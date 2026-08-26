@@ -1,0 +1,10 @@
+uvicorn
+pandas
+matplotlib
+numpy
+umap-learn
+hdbscan
+fastapi
+pydantic
+supabase
+chromadb
