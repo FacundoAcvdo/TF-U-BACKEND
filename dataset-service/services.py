@@ -306,9 +306,14 @@ class DatasetService:
         user_token: str,
     ) -> list[DatasetInfo]:
 
-        datasets = await self.supabase.get_datasets_by_user(
-            user_id=user_id,
-            user_token=user_token,
-        )
+        try:
+            datasets = await self.supabase.get_datasets_by_user(
+                user_id=user_id,
+                user_token=user_token,
+            )
 
-        return datasets
+            return datasets
+
+        except Exception as e:
+            print(f"Error retrieving datasets for user {user_id}: {e}")
+            raise

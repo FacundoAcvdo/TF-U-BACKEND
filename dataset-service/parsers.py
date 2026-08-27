@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from models import Documento
+from models import Document
 
 
 class BaseDocumentParser(ABC):
@@ -18,7 +18,7 @@ class BaseDocumentParser(ABC):
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+    ) -> list[Document]:
 
         raise NotImplementedError
 
@@ -34,7 +34,7 @@ class DataFrameParser(
         columna_clase: str | None,
         columna_fecha: str | None,
         extra_metadata: dict[str, Any] | None,
-    ) -> list[Documento]:
+    ) -> list[Document]:
 
         if columna_texto not in df.columns:
 
@@ -81,7 +81,7 @@ class DataFrameParser(
             if column not in columnas_mapeadas
         ]
 
-        documents: list[Documento] = []
+        documents: list[Document] = []
 
         for index, row in df.iterrows():
 
@@ -139,7 +139,7 @@ class DataFrameParser(
                     fecha = str(value)
 
             documents.append(
-                Documento(
+                Document(
                     texto=text,
                     clase=clase,
                     fecha=fecha,
@@ -168,7 +168,7 @@ class CSVParser(
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+    ) -> list[Document]:
 
         df = self._leer_csv(content)
 
@@ -226,7 +226,7 @@ class XLSXParser(
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+    ) -> list[Document]:
 
         try:
             df = pd.read_excel(

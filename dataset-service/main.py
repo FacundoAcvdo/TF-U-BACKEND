@@ -223,14 +223,12 @@ async def getDataset(
     x_user_token: str = Header(...),
 ):
     try:
-        
         datasets = (
             await dataset_service.get_datasets(
                 user_id=x_user_id,
                 user_token=x_user_token
             )
         )
-
         return {
             "datasets": datasets,
         }

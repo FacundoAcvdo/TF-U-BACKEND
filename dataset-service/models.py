@@ -49,7 +49,7 @@ class Document:
         return result
 
     @classmethod
-    def from_dict(cls,data: dict[str, Any],) -> "Documento":
+    def from_dict(cls,data: dict[str, Any],) -> "Document":
         return cls(
             texto=str(data["texto"]),
             clase=data.get("clase"),
@@ -69,7 +69,7 @@ class DatasetDocument:
 
     created_at: str
 
-    documents: list[Documento]
+    documents: list[Document]
 
     version: str = "1.0"
 
@@ -90,7 +90,7 @@ class DatasetDocument:
     @classmethod
     def from_dict(cls,data: dict[str, Any],) -> "DatasetDocument":
         documents = [
-            Documento.from_dict(item)
+            Document.from_dict(item)
             for item in data.get(
                 "documents",
                 [],

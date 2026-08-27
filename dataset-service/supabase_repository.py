@@ -158,7 +158,7 @@ class SupabaseRepository:
         self,
         user_id: str,
         user_token: str,
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
 
         supabase = self.get_supabase_client(user_jwt=user_token)
 
@@ -169,13 +169,4 @@ class SupabaseRepository:
             .execute()
         )
 
-        datasets = response.data
-
-        if response.status_code >= 400:
-
-            raise RuntimeError(
-                "No se pudo consultar el dataset "
-                "en Supabase."
-            )
-
-        return datasets
+        return response.data
