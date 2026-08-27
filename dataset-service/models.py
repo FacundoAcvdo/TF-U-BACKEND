@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 
 @dataclass
-class Documento:
+class Document:
 
     texto: str
 
@@ -122,3 +122,14 @@ class DatasetInfo:
     total_documents: int
 
     created_at: str
+
+@dataclass
+class ChromaDocuments:
+
+    ids: list[str]
+
+    documents: list[str]
+
+    metadatas: list[dict[str, Any]]
+
+    embeddings: list[list[float]] | None = None

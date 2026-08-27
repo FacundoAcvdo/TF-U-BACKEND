@@ -20,8 +20,8 @@ class ChromaRepository:
 
             client_kwargs["headers"] = {
                 "Authorization": (
-                   "Bearer "
-                  + settings.chroma_token
+                    "Bearer "
+                    + settings.chroma_token
                 )
             }
 
@@ -56,4 +56,16 @@ class ChromaRepository:
 
         self.collection.add(
             **payload
+        )
+
+    def delete_documents(
+        self,
+        ids: list[str],
+    ) -> None:
+
+        if not ids:
+            return
+
+        self.collection.delete(
+            ids=ids,
         )

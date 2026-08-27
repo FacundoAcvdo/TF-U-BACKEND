@@ -125,63 +125,51 @@ class SupabaseRepository:
 
     async def delete_dataset(
         self,
+        *,
         dataset_id: str,
         user_id: str,
+        user_token: str,
     ) -> None:
 
-        url = (
-            f"{self.base_url}/rest/v1/"
-            f"{self.table}"
+        supabase = self.get_supabase_client(
+            user_token
         )
 
-        params = {
-            "id": f"eq.{dataset_id}",
-            "user_id": f"eq.{user_id}",
-        }
+        try:
 
-        async with httpx.AsyncClient(
-            timeout=5.0
-        ) as client:
-
-            response = await client.delete(
-                url,
-                headers=self.headers,
-                params=params,
+            (
+                supabase
+                .table(self.table)
+                .delete()
+                .eq("dataset_id", dataset_id)
+                .eq("user_id", user_id)
+                .execute()
             )
 
-        if response.status_code >= 400:
+        except Exception as e:
 
             raise RuntimeError(
                 "No se pudo eliminar el dataset "
                 "de Supabase."
-            )
+                f" Error: {e}"
+            ) from e
 
-    async def get_dataset(
+    async def get_datasets_by_user(
         self,
-        dataset_id: str,
         user_id: str,
+        user_token: str,
     ) -> dict[str, Any] | None:
 
-        url = (
-            f"{self.base_url}/rest/v1/"
-            f"{self.table}"
+        supabase = self.get_supabase_client(user_jwt=user_token)
+
+        response = (
+            supabase.table("datasets")
+            .select("*")
+            .eq("user_id", user_id)
+            .execute()
         )
 
-        params = {
-            "id": f"eq.{dataset_id}",
-            "user_id": f"eq.{user_id}",
-            "select": "*",
-        }
-
-        async with httpx.AsyncClient(
-            timeout=5.0
-        ) as client:
-
-            response = await client.get(
-                url,
-                headers=self.headers,
-                params=params,
-            )
+        datasets = response.data
 
         if response.status_code >= 400:
 
@@ -190,9 +178,4 @@ class SupabaseRepository:
                 "en Supabase."
             )
 
-        rows = response.json()
-
-        if not rows:
-            return None
-
-        return rows[0]
+        return datasets

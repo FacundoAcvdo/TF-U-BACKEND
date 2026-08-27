@@ -24,7 +24,7 @@ class LocalJsonDatasetStorage(
         base_path: Path,
     ) -> None:
 
-        self.base_path = Path("./data/datasets")
+        self.base_path = Path(base_path)
 
         self.base_path.mkdir(
             parents=True,
@@ -76,4 +76,19 @@ class LocalJsonDatasetStorage(
             )
         temporary_path.replace(
             path
+        )
+
+    async def delete(
+        self,
+        user_id: str,
+        dataset_id: str,
+    ) -> None:
+
+        path = self._dataset_path(
+            user_id=user_id,
+            dataset_id=dataset_id,
+        )
+
+        path.unlink(
+            missing_ok=True
         )

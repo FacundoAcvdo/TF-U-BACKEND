@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     internal_service_token: str = ""
 
-    dataset_storage_path: str = "/data/datasets"
+    dataset_storage_path: str = "./data/datasets"
     max_upload_size_mb: int = 50
 
     supabase_url: str = ""
