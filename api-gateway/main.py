@@ -13,9 +13,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 SERVICES = {
     "clustering": os.getenv("CLUSTERING_SERVICE_URL"),
-    "dataset": os.getenv("DATASET_SERVICE_URL")
+    "dataset": os.getenv("DATASET_SERVICE_URL"),
+    "eda": os.getenv("EDA-SERVICE_URL")
 }
 
 @app.post("/auth/login")

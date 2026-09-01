@@ -116,7 +116,7 @@ async def main(
         buffer.seek(0)
         imagen_bytes = buffer.read()
 
-        image_name = f"{x_user_id}_{uuid.uuid4()}.png"
+        image_name = f"{x_user_id}/{uuid.uuid4()}.png"
 
         storage.from_("imagenes-generadas").upload(
             path=image_name,

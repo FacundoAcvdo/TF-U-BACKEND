@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -10,7 +11,7 @@ class Settings(BaseSettings):
 
     internal_service_token: str = ""
 
-    dataset_storage_path: str = "./data/datasets"
+    dataset_storage_path: str = os.environ.get("DATASET_STORAGE_PATH", "./data/datasets")
     max_upload_size_mb: int = 50
 
     supabase_url: str = ""
