@@ -1,0 +1,8 @@
+bertopic
+chromadb
+umap-learn
+hdbscan
+sentence-transformers
+fastapi
+uvicorn
+supabase

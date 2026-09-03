@@ -15,7 +15,8 @@ app.add_middleware(
 )
 SERVICES = {
     "clustering": os.getenv("CLUSTERING_SERVICE_URL"),
-    "dataset": os.getenv("DATASET_SERVICE_URL")
+    "dataset": os.getenv("DATASET_SERVICE_URL"),
+    "topicmodeling": os.getenv("TOPIC_MODELING_SERVICE_URL"),
 }
 
 @app.post("/auth/login")
