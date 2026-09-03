@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import pandas as pd
+import polars as pl
 
 from models import Document
 
@@ -184,34 +185,49 @@ class CSVParser(
         self,
         content: bytes,
     ) -> pd.DataFrame:
-
         ultimo_error: Exception | None = None
 
         for encoding in self.ENCODINGS_A_PROBAR:
-
             try:
+                if encoding.lower() in ("utf-8", "utf8"):
+                    df_pl = pl.read_csv(
+                        io.BytesIO(content),
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        truncate_ragged_lines=True,
+                    )
+                else:
+                    texto = content.decode(encoding)
+                    df_pl = pl.read_csv(
+                        io.StringIO(texto),
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        truncate_ragged_lines=True,
+                    )
 
-                return pd.read_csv(
-                    io.BytesIO(content),
-                    sep=None,
-                    engine="python",
-                    dtype=str,
-                    encoding=encoding,
+                nuevas_columnas = {
+                    col: f"unnamed_{i}"
+                    for i, col in enumerate(df_pl.columns)
+                    if not col or not col.strip()
+                }
+                if nuevas_columnas:
+                    df_pl = df_pl.rename(nuevas_columnas)
+
+                return (
+                    df_pl.to_pandas()
+                    if hasattr(df_pl, "to_pandas")
+                    else pd.DataFrame(df_pl.to_dicts())
                 )
 
             except UnicodeDecodeError as exc:
-
+                ultimo_error = exc
+                continue
+            except Exception as exc:
                 ultimo_error = exc
                 continue
 
-            except Exception as exc:
-                raise ValueError(f"No se pudo leer el CSV: {exc}") from exc
-
         raise ValueError(
-            "No se pudo leer el CSV: no se "
-            "reconoce la codificación del "
-            "archivo "
-            f"(último error: {ultimo_error})"
+            f"No se pudo leer el CSV: no se reconoce la codificación (último error: {ultimo_error})"
         )
 
 
