@@ -6,3 +6,4 @@ sentence-transformers
 fastapi
 uvicorn
 supabase
+nltk

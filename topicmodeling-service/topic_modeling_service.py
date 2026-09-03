@@ -69,12 +69,6 @@ class TopicModelingService:
                 "con la cantidad de embeddings."
             )
 
-        print(
-            f"Ejecutando topic modeling para dataset "
-            f"'{dataset_name}' (ID: {dataset_id}) "
-            f"con {len(documents)} documentos."
-        )
-        
         resultado = await self.topic_provider.extract_topics(
             documents=documents,
             embeddings=embeddings,
