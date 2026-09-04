@@ -2,8 +2,10 @@ bertopic
 chromadb
 umap-learn
 hdbscan
+scikit-learn
+numpy
 sentence-transformers
 fastapi
-uvicorn
+uvicorn[standard]
 supabase
 nltk

@@ -8,11 +8,14 @@ from fastapi import (
     HTTPException,
 )
 
+from config import get_settings
 from topic_modeling_service import TopicModelingService
 from supabase_service import SupabaseService
 from chroma_service import ChromaService
 from topic_modeling_provider import TopicModelingProvider
+from storage_service import StorageService
 
+settings = get_settings()
 app = FastAPI()
 
 origins = ["http://localhost:8080"]
@@ -28,11 +31,15 @@ app.add_middleware(
 supabase_service = SupabaseService()
 chroma_service = ChromaService()
 topic_provider = TopicModelingProvider()
+storage_service = StorageService(
+    settings.dataset_storage_path
+)
 
 topic_modeling_service = TopicModelingService(
     supabase_repository=supabase_service,
     chroma_repository=chroma_service,
     topic_provider=topic_provider,
+    storage_service=storage_service
 )
 
 @app.post("/getTopics")

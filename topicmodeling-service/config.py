@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     chroma_token: str = ""
     chroma_collection_name: str = "documents"
 
+    dataset_storage_path: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
