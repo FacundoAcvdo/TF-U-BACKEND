@@ -1,6 +1,10 @@
 import os
 from typing import Annotated
 
+from contextlib import asynccontextmanager
+import logging
+import torch
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -23,7 +27,7 @@ from dependencies import (
     get_request_context,
 )
 from embeddings import (
-    NoEmbeddingProvider,
+    LocalSentenceTransformerProvider,
 )
 from services import DatasetService
 from supabase_repository import (
@@ -34,9 +38,36 @@ from fastapi.middleware.cors import CORSMiddleware
 
 settings = get_settings()
 
+logger = logging.getLogger("uvicorn.info")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Verificación de GPU al iniciar ---
+    logger.info("=" * 55)
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        vram_reserved_gb = torch.cuda.memory_reserved(0) / (1024**3)
+        vram_free_gb = vram_total_gb - vram_reserved_gb
+
+        logger.info("🚀 [GPU DETECTADA] Soporte CUDA activo")
+        logger.info(f"   Placa:        {gpu_name}")
+        logger.info(f"   VRAM Total:   {vram_total_gb:.2f} GB")
+        logger.info(f"   VRAM Libre:   {vram_free_gb:.2f} GB")
+    else:
+        logger.warning("⚠️  [MODO CPU] CUDA no disponible. Corriendo en procesador.")
+    logger.info("=" * 55)
+
+    yield
+
+    # --- Limpieza al apagar el contenedor ---
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
+    lifespan=lifespan
 )
 
 origins = ["http://localhost:8080"]
@@ -57,7 +88,7 @@ supabase_repository = SupabaseRepository()
 
 chroma_repository = ChromaRepository()
 
-embedding_provider = NoEmbeddingProvider()
+embedding_provider = LocalSentenceTransformerProvider()
 
 dataset_service = DatasetService(
     dataset_storage=dataset_storage,

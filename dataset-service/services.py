@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-
+import math 
 from chroma_repository import ChromaRepository
 from dataset_storage import DatasetStorage
 from embeddings import EmbeddingProvider
@@ -85,7 +85,11 @@ class DatasetService:
             documents=documents,
         )
 
-        # Cuanto tenga un modelo como la gente genero los vectores y los meto en chroma_data.embeddings
+        embeddings = self.embedding_provider.embed_documents(
+            texts=chroma_data.documents,
+        )
+
+        chroma_data.embeddings = embeddings
 
         await self._persist_dataset(
             dataset=dataset,
@@ -177,44 +181,33 @@ class DatasetService:
         dataset_name: str,
         documents: list[Document],
     ) -> ChromaDocuments:
-
         ids: list[str] = []
-
         texts: list[str] = []
-
-        metadatas: list[
-            dict[str, Any]
-        ] = []
+        metadatas: list[dict[str, Any]] = []
 
         for document in documents:
+            document_id = str(uuid.uuid4())
+            raw_meta = document.to_chroma_metadata()
 
-            document_id = str(
-                uuid.uuid4()
-            )
+            clean_meta: dict[str, str | int | float | bool] = {
+                "dataset_id": str(dataset_id),
+                "user_id": str(user_id),
+                "source_filename": str(dataset_name or ""),
+            }
 
-            metadata = (
-                document.to_chroma_metadata()
-            )
+            for k, v in raw_meta.items():
+                if v is None:
+                    continue
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    continue
+                if isinstance(v, (str, int, float, bool)):
+                    clean_meta[k] = v
+                else:
+                    clean_meta[k] = str(v)
 
-            metadata.update(
-                {
-                    "dataset_id": dataset_id,
-                    "user_id": user_id,
-                    "source_filename": dataset_name,
-                }
-            )
-
-            ids.append(
-                document_id
-            )
-
-            texts.append(
-                document.texto
-            )
-
-            metadatas.append(
-                metadata
-            )
+            ids.append(document_id)
+            texts.append(document.texto)
+            metadatas.append(clean_meta)
 
         return ChromaDocuments(
             ids=ids,

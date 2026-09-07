@@ -19,6 +19,7 @@ SERVICES = {
     "dataset": os.getenv("DATASET_SERVICE_URL"),
     "eda": os.getenv("EDA_SERVICE_URL"),
     "emotions": os.getenv("EMOTIONS_SERVICE_URL"),
+    "topicmodeling": os.getenv("TOPIC_MODELING_SERVICE_URL"),
 }
 
 @app.post("/auth/login")

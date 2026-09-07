@@ -1,0 +1,11 @@
+bertopic
+chromadb
+umap-learn
+hdbscan
+scikit-learn
+numpy
+sentence-transformers
+fastapi
+uvicorn[standard]
+supabase
+nltk

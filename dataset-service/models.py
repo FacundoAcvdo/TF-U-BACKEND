@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+import math
 
 @dataclass
 class Document:
@@ -27,7 +28,6 @@ class Document:
     def to_chroma_metadata(
         self,
     ) -> dict[str, Any]:
-
         result: dict[str, Any] = {}
 
         if self.clase is not None:
@@ -37,14 +37,19 @@ class Document:
             result["fecha"] = str(self.fecha)
 
         for key, value in self.metadata.items():
-
             if value is None:
+                continue
+            
+            if isinstance(value, float) and math.isnan(value):
                 continue
 
             if isinstance(value, (str, int, float, bool)):
                 result[key] = value
             else:
                 result[key] = str(value)
+
+        if not result:
+            result["_empty"] = True
 
         return result
 
