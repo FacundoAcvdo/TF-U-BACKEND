@@ -1,6 +1,8 @@
 import base64
 import io
 import os
+import zipfile
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import chromadb
@@ -29,7 +31,7 @@ import torch
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-roberta-large-v1" 
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-roberta-large-v1"  # Cambiar por el que usemos después
 
 app = FastAPI()
 
@@ -45,11 +47,6 @@ app.add_middleware(
 
 
 def get_supabase_client(user_jwt: str):
-    if not user_jwt or user_jwt.strip() in ["", "null", "undefined"]:
-        raise HTTPException(
-            status_code=401,
-            detail="Token de autorización ausente o inválido.",
-        )
     client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     client.postgrest.auth(user_jwt)
     return client
@@ -101,7 +98,7 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
         raise HTTPException(status_code=400, detail="No se encontraron metadatos en ChromaDB.")
 
     valores_raw = [str(meta.get("clase", "")).strip() for meta in metadatas]
-    
+
     le = LabelEncoder()
     y = le.fit_transform(valores_raw)
 
@@ -117,6 +114,90 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
     print(f"[CLASIFICACION] Clases detectadas automáticamente: {label_mapping}")
 
     return y, label_mapping, clases_unicas
+
+
+def generar_readme(
+    nombre_modelo: str,
+    encoder_base: str,
+    label_mapping: dict,
+    metricas: dict,
+    modo: str,
+    total_muestras: int,
+) -> str:
+    mapping_lines = "\n".join(f"- `{clase}` → `{idx}`" for clase, idx in label_mapping.items())
+
+    return f"""# Modelo de clasificación
+
+Generado: {datetime.now(timezone.utc).isoformat()}
+
+## Contenido del artefacto
+
+- `modelo.pt`: checkpoint de PyTorch (`torch.save`/`torch.load`) que contiene:
+  - `clasificador`: el modelo de scikit-learn ya entrenado ({nombre_modelo}).
+  - `encoder_base`: nombre del modelo de embeddings usado para vectorizar el texto.
+  - `label_mapping`: mapeo clase → id numérico.
+  - `clases_nombres`: lista de clases en el orden que usa el encoder.
+  - Métricas de evaluación (`accuracy`, `f1_score`, `precision`, `recall`).
+
+## Configuración de entrenamiento
+
+- Modelo: **{nombre_modelo}**
+- Modo de evaluación: **{modo}**
+- Total de muestras: **{total_muestras}**
+- Accuracy: **{metricas['accuracy']:.4f}**
+- F1-score (weighted): **{metricas['f1_score']:.4f}**
+- Precision (weighted): **{metricas['precision']:.4f}**
+- Recall (weighted): **{metricas['recall']:.4f}**
+
+## Mapeo de clases
+
+{mapping_lines}
+
+## Cómo usar este modelo para clasificar texto nuevo
+
+Necesitás el mismo modelo de embeddings que se usó para entrenar
+(`{encoder_base}`), instalado vía `sentence-transformers`.
+
+```python
+import torch
+from sentence_transformers import SentenceTransformer
+
+# 1. Cargar el checkpoint
+checkpoint = torch.load("modelo.pt", weights_only=False)
+
+clf = checkpoint["clasificador"]
+encoder_base = checkpoint["encoder_base"]
+label_mapping = checkpoint["label_mapping"]
+clases_nombres = checkpoint["clases_nombres"]
+
+# 2. Cargar el mismo encoder de embeddings usado en el entrenamiento
+encoder = SentenceTransformer(encoder_base)
+
+# 3. Vectorizar el/los texto(s) nuevo(s)
+textos = ["texto de ejemplo a clasificar"]
+embeddings = encoder.encode(textos)
+
+# 4. Predecir
+prediccion_id = clf.predict(embeddings)
+prediccion_clase = [clases_nombres[i] for i in prediccion_id]
+
+print(prediccion_clase)
+```
+
+## Requisitos
+
+```
+pip install torch scikit-learn sentence-transformers
+```
+
+## Notas
+
+- El clasificador espera embeddings de la misma dimensionalidad y del mismo
+  encoder con el que fue entrenado (`{encoder_base}`). Usar un encoder distinto
+  produce predicciones sin sentido.
+- `label_mapping` y `clases_nombres` sirven para traducir la salida numérica
+  del clasificador de vuelta al nombre real de la clase.
+"""
 
 
 @app.post("/detectar_menciones", response_model=TrainingResponse)
@@ -202,21 +283,36 @@ async def detectar_menciones(
         prec = float(precision_score(y_eval, y_pred, average="weighted", zero_division=0))
         rec = float(recall_score(y_eval, y_pred, average="weighted", zero_division=0))
 
-        buffer = io.BytesIO()
+        metricas = {"accuracy": acc, "f1_score": f1, "precision": prec, "recall": rec}
+
+        checkpoint_buffer = io.BytesIO()
         checkpoint = {
             "clasificador": clf,
             "encoder_base": EMBEDDING_MODEL_NAME,
             "label_mapping": label_mapping,
             "clases_nombres": clases_nombres,
-            "accuracy": acc,
-            "f1_score": f1,
-            "precision": prec,
-            "recall": rec,
+            **metricas,
         }
-        torch.save(checkpoint, buffer)
-        buffer.seek(0)
-        modelo_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-        file_name = f"{data.modelo.lower().replace(' ', '_')}_modelo.pt"
+        torch.save(checkpoint, checkpoint_buffer)
+        checkpoint_buffer.seek(0)
+
+        readme_texto = generar_readme(
+            nombre_modelo=data.modelo,
+            encoder_base=EMBEDDING_MODEL_NAME,
+            label_mapping=label_mapping,
+            metricas=metricas,
+            modo=data.modo,
+            total_muestras=total_muestras,
+        )
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("modelo.pt", checkpoint_buffer.read())
+            zf.writestr("README.md", readme_texto)
+        zip_buffer.seek(0)
+
+        archivo_base64 = base64.b64encode(zip_buffer.read()).decode("utf-8")
+        file_name = f"{data.modelo.lower().replace(' ', '_')}_modelo.zip"
 
         return TrainingResponse(
             resumen=ResumenMenciones(
@@ -232,7 +328,7 @@ async def detectar_menciones(
                 muestras_train=muestras_train,
                 muestras_test=muestras_test,
             ),
-            archivo_base64=modelo_base64,
+            archivo_base64=archivo_base64,
             nombre_archivo=file_name,
         )
 
