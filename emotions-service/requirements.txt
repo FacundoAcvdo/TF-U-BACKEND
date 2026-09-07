@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+supabase
+storage3
+empath
