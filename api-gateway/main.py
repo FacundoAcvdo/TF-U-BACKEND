@@ -17,7 +17,8 @@ app.add_middleware(
 SERVICES = {
     "clustering": os.getenv("CLUSTERING_SERVICE_URL"),
     "dataset": os.getenv("DATASET_SERVICE_URL"),
-    "eda": os.getenv("EDA-SERVICE_URL")
+    "eda": os.getenv("EDA_SERVICE_URL"),
+    "emotions": os.getenv("EMOTIONS_SERVICE_URL"),
 }
 
 @app.post("/auth/login")
