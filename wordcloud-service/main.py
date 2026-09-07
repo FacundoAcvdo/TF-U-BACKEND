@@ -77,7 +77,7 @@ def limpiar_texto(texto: str) -> str:
     return " ".join(palabras)
 
 @app.post("/visualizeWordCloud")
-async def getWordCloud(
+async def createWordCloud(
     data: WordCloudRequest,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
@@ -113,7 +113,6 @@ async def getWordCloud(
                 status_code=500,
                 detail="Dataset does not have a dataset_id."
             )
-
 
         print(f"Looking for dataset directory for user {x_user_id} and dataset_id {dataset_id}")
 
@@ -153,17 +152,21 @@ async def getWordCloud(
             )
 
         wordcloud = WordCloud(
-            width=1600,
-            height=900,
+            width=2400,
+            height=1200,
             background_color="white",
             max_words=200,
             collocations=False,
-            stopwords=STOPWORDS
+            stopwords=STOPWORDS,
+            colormap="magma_r",
+            font_path="./Inter_24pt-SemiBold.ttf",
+            prefer_horizontal=0.9,
         ).generate(texto_completo)
 
-        plt.figure(figsize=(16, 9))
+        plt.figure(figsize=(12, 6), dpi=200)
         plt.imshow(wordcloud, interpolation="bilinear")
         plt.axis("off")
+        plt.title("")
 
         buffer = io.BytesIO()
 
@@ -223,7 +226,7 @@ async def getWordCloud(
         )
 
 @app.post("/getWordCloudImage")
-async def get_clustering_image(
+async def getWordCloudImage(
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
     data: WordCloudRequest = None
