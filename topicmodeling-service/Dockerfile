@@ -22,6 +22,4 @@ RUN python -m nltk.downloader stopwords
 # 4. Copiar el código fuente
 COPY . .
 
-# 5. Puerto y comando de inicio
-EXPOSE 8088
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8088"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8083"]
