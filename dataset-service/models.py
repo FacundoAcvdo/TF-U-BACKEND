@@ -1,5 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import json
 from typing import Any
 import math
 
@@ -91,6 +92,13 @@ class DatasetDocument:
                 for document in self.documents
             ],
         }
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            asdict(self),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
 
     @classmethod
     def from_dict(cls,data: dict[str, Any],) -> "DatasetDocument":

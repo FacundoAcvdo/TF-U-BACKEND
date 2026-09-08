@@ -12,7 +12,18 @@ class EmbeddingProvider(ABC):
     ) -> list[list[float]]:
         raise NotImplementedError
 
+    def calculate_embedding_size_bytes(
+        self,
+        embeddings: list[list[float]],
+    ) -> int:
+        if not embeddings:
+            return 0
 
+        dimension = len(embeddings[0])
+        bytes_per_float32 = 4 
+        return len(embeddings) * dimension * bytes_per_float32
+
+    
 class NoEmbeddingProvider(EmbeddingProvider):
 
     def embed_documents(

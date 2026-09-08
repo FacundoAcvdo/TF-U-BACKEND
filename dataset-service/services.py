@@ -91,10 +91,17 @@ class DatasetService:
 
         chroma_data.embeddings = embeddings
 
+        dataset_size_bytes = dataset.to_json_bytes()
+        dataset_size_bytes = len(dataset_size_bytes)
+
+        embedding_size_bytes = self.embedding_provider.calculate_embedding_size_bytes(embeddings)
+
         await self._persist_dataset(
             dataset=dataset,
             chroma_data=chroma_data,
             user_token=user_token,
+            dataset_size_bytes=dataset_size_bytes,
+            embedding_size_bytes=embedding_size_bytes,
         )
 
         return DatasetInfo(
@@ -221,6 +228,8 @@ class DatasetService:
         dataset: DatasetDocument,
         chroma_data: ChromaDocuments,
         user_token: str,
+        dataset_size_bytes: int,
+        embedding_size_bytes: int,
     ) -> None:
 
         try:
@@ -241,6 +250,9 @@ class DatasetService:
                 user_id=dataset.user_id,
                 filename=dataset.filename,
                 user_token=user_token,
+                dataset_size=dataset_size_bytes,
+                embedding_size=embedding_size_bytes,
+                embedding_chunked_size=0,
             )
 
         except Exception:
