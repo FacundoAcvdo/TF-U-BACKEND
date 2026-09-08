@@ -322,3 +322,63 @@ class DatasetService:
         except Exception as e:
             print(f"Error retrieving datasets for user {user_id}: {e}")
             raise
+
+    async def delete_dataset(
+        self,
+        *,
+        dataset_id: str,
+        user_id: str,
+        user_token: str,
+    ) -> None:
+
+        if not dataset_id:
+            raise ValueError(
+                "El dataset_id no puede estar vacío."
+            )
+
+        try:
+
+            await self.supabase.delete_dataset(
+                dataset_id=dataset_id,
+                user_id=user_id,
+                user_token=user_token,
+            )
+
+            self.chroma.delete_documents_by_dataset(
+                dataset_id=dataset_id,
+            )
+
+            await self.storage.delete_dataset(
+                user_id=user_id,
+                dataset_id=dataset_id,
+            )
+
+        except Exception as e:
+            print(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
+            raise
+
+    async def delete_datasets_by_user(
+        self,
+        *,
+        user_id: str,
+        user_token: str,
+    ) -> None:
+
+        try:
+
+            await self.supabase.delete_datasets_by_user(
+                user_id=user_id,
+                user_token=user_token,
+            )
+
+            self.chroma.delete_documents_by_user(
+                user_id=user_id,
+            )
+
+            await self.storage.delete_datasets_by_user(
+                user_id=user_id,
+            )
+
+        except Exception as e:
+            print(f"Error deleting datasets for user {user_id}: {e}")
+            raise

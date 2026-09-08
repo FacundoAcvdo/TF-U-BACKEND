@@ -83,14 +83,18 @@ class ChromaRepository:
             # Inserción en Chroma
             self.collection.add(**payload)
 
-    def delete_documents(
+    def delete_documents_by_dataset(
         self,
-        ids: list[str],
+        dataset_id: str,
     ) -> None:
-
-        if not ids:
-            return
-
         self.collection.delete(
-            ids=ids,
+            where={"dataset_id": dataset_id}
+        )
+
+    def delete_documents_by_user(
+        self,
+        user_id: str,
+    ) -> None:
+        self.collection.delete(
+            where={"user_id": user_id}
         )

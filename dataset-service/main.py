@@ -268,3 +268,42 @@ async def getDataset(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/deleteDataset")
+async def deleteDataset(
+    dataset_id: str,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    try:
+        await dataset_service.delete_dataset(
+            dataset_id=dataset_id,
+            user_id=x_user_id,
+            user_token=x_user_token
+        )
+        return {
+            "status": "success",
+            "message": f"Dataset {dataset_id} eliminado correctamente."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/deleteDatasetsByUser")
+async def deleteDatasetsByUser(
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    try:
+        await dataset_service.delete_datasets_by_user(
+            user_id=x_user_id,
+            user_token=x_user_token
+        )
+        return {
+            "status": "success",
+            "message": f"Todos los datasets del usuario {x_user_id} eliminados correctamente."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -160,6 +160,34 @@ class SupabaseRepository:
                 f" Error: {e}"
             ) from e
 
+    async def delete_datasets_by_user(
+        self,
+        user_id: str,
+        user_token: str,
+    ) -> None:
+
+        supabase = self.get_supabase_client(
+            user_token
+        )
+
+        try:
+
+            (
+                supabase
+                .table(self.table)
+                .delete()
+                .eq("user_id", user_id)
+                .execute()
+            )
+
+        except Exception as e:
+
+            raise RuntimeError(
+                "No se pudieron eliminar los datasets "
+                "del usuario de Supabase."
+                f" Error: {e}"
+            ) from e
+
     async def get_datasets_by_user(
         self,
         user_id: str,

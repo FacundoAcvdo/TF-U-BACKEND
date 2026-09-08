@@ -78,7 +78,7 @@ class LocalJsonDatasetStorage(
             path
         )
 
-    async def delete(
+    async def delete_dataset(
         self,
         user_id: str,
         dataset_id: str,
@@ -90,5 +90,25 @@ class LocalJsonDatasetStorage(
         )
 
         path.unlink(
+            missing_ok=True
+        )
+
+    async def delete_datasets_by_user(
+        self,
+        user_id: str,
+    ) -> None:
+
+        user_path = (
+            self.base_path
+            / "users"
+            / user_id
+        )
+
+        for dataset_file in user_path.glob("*.json"):
+            dataset_file.unlink(
+                missing_ok=True
+            )
+
+        user_path.rmdir(
             missing_ok=True
         )
