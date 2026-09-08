@@ -31,7 +31,7 @@ import torch
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-roberta-large-v1"  # Cambiar por el que usemos después
+EMBEDDING_MODEL_NAME = "chromadb-default (all-MiniLM-L6-v2, ONNX)"
 
 app = FastAPI()
 
@@ -96,8 +96,19 @@ def instanciar_clasificador(nombre: str):
 def procesar_etiquetas_automatico(metadatas: list[dict]):
     if not metadatas:
         raise HTTPException(status_code=400, detail="No se encontraron metadatos en ChromaDB.")
-
+    
     valores_raw = [str(meta.get("clase", "")).strip() for meta in metadatas]
+    faltantes = sum(1 for v in valores_raw if v == "")
+
+    if faltantes > 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Este dataset tiene {faltantes} mensaje(s) sin clase asignada. "
+                f"No se puede clasificar hasta "
+                f"que todos los mensajes estén etiquetados."
+            ),
+        )
 
     le = LabelEncoder()
     y = le.fit_transform(valores_raw)
@@ -110,6 +121,16 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
             detail=f"El dataset contiene una única clase ('{clases_unicas[0]}'). Se requieren al menos dos para entrenar.",
         )
 
+    if len(clases_unicas) > 2:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Este dataset tiene {len(clases_unicas)} clases distintas. "
+                f"Este clasificador es binario, "
+                f"se esperan exactamente 2 clases."
+            ),
+        )
+
     label_mapping = {clase: int(idx) for idx, clase in enumerate(clases_unicas)}
     print(f"[CLASIFICACION] Clases detectadas automáticamente: {label_mapping}")
 
@@ -117,33 +138,43 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
 
 
 def generar_readme(
+    dataset_name: str,
     nombre_modelo: str,
     encoder_base: str,
     label_mapping: dict,
+    clases_nombres: list,
     metricas: dict,
     modo: str,
     total_muestras: int,
+    muestras_train: int,
+    muestras_test: int,
 ) -> str:
+    fecha = datetime.now(timezone.utc).isoformat()
     mapping_lines = "\n".join(f"- `{clase}` → `{idx}`" for clase, idx in label_mapping.items())
+    clases_literal = repr(clases_nombres)
+    primer_clase = clases_nombres[0]
 
-    return f"""# Modelo de clasificación
+    return f"""# Modelo de clasificación de menciones
 
-Generado: {datetime.now(timezone.utc).isoformat()}
+- Dataset: **{dataset_name}**
+- Modelo: **{nombre_modelo}**
+- Generado: **{fecha}**
 
 ## Contenido del artefacto
 
 - `modelo.pt`: checkpoint de PyTorch (`torch.save`/`torch.load`) que contiene:
   - `clasificador`: el modelo de scikit-learn ya entrenado ({nombre_modelo}).
-  - `encoder_base`: nombre del modelo de embeddings usado para vectorizar el texto.
-  - `label_mapping`: mapeo clase → id numérico.
-  - `clases_nombres`: lista de clases en el orden que usa el encoder.
+  - `encoder_base`: `"{encoder_base}"`.
+  - `label_mapping`: mapeo clase → id numérico (ver abajo).
+  - `clases_nombres`: `{clases_literal}`.
   - Métricas de evaluación (`accuracy`, `f1_score`, `precision`, `recall`).
 
 ## Configuración de entrenamiento
 
-- Modelo: **{nombre_modelo}**
 - Modo de evaluación: **{modo}**
 - Total de muestras: **{total_muestras}**
+- Muestras de entrenamiento: **{muestras_train}**
+- Muestras de evaluación: **{muestras_test}**
 - Accuracy: **{metricas['accuracy']:.4f}**
 - F1-score (weighted): **{metricas['f1_score']:.4f}**
 - Precision (weighted): **{metricas['precision']:.4f}**
@@ -155,48 +186,64 @@ Generado: {datetime.now(timezone.utc).isoformat()}
 
 ## Cómo usar este modelo para clasificar texto nuevo
 
-Necesitás el mismo modelo de embeddings que se usó para entrenar
-(`{encoder_base}`), instalado vía `sentence-transformers`.
+⚠️ Los embeddings con los que se entrenó este modelo salieron del
+**embedding function por defecto de ChromaDB** (basado en `all-MiniLM-L6-v2`,
+corrido con ONNX Runtime), NO de cargar ese modelo directamente con la
+librería `sentence-transformers`. Aunque es el mismo modelo base, el runtime
+ONNX de Chroma puede no dar vectores idénticos byte a byte a los de
+`sentence-transformers`. Para evitar mismatches, usá el mismo embedder de
+Chroma también para vectorizar texto nuevo:
 
 ```python
 import torch
-from sentence_transformers import SentenceTransformer
+from chromadb.utils import embedding_functions
 
-# 1. Cargar el checkpoint
+# Datos de este modelo (dataset: {dataset_name}, modelo: {nombre_modelo})
+CLASES_NOMBRES = {clases_literal}
+
+# 1. Cargar el checkpoint entrenado
 checkpoint = torch.load("modelo.pt", weights_only=False)
-
 clf = checkpoint["clasificador"]
-encoder_base = checkpoint["encoder_base"]
-label_mapping = checkpoint["label_mapping"]
-clases_nombres = checkpoint["clases_nombres"]
 
-# 2. Cargar el mismo encoder de embeddings usado en el entrenamiento
-encoder = SentenceTransformer(encoder_base)
+# 2. Usar el MISMO embedder por defecto de Chroma (para que el vector caiga
+#    en el mismo espacio que se usó al entrenar)
+embedder = embedding_functions.DefaultEmbeddingFunction()
 
 # 3. Vectorizar el/los texto(s) nuevo(s)
-textos = ["texto de ejemplo a clasificar"]
-embeddings = encoder.encode(textos)
+textos = [
+    "texto de ejemplo a clasificar",
+]
+embeddings = embedder(textos)
 
 # 4. Predecir
 prediccion_id = clf.predict(embeddings)
-prediccion_clase = [clases_nombres[i] for i in prediccion_id]
+prediccion_clase = [CLASES_NOMBRES[i] for i in prediccion_id]
 
-print(prediccion_clase)
+for texto, clase in zip(textos, prediccion_clase):
+    print(f"'{{texto}}' -> {{clase}}")
+
+# Salida esperada, por ejemplo:
+# 'texto de ejemplo a clasificar' -> {primer_clase}
 ```
 
 ## Requisitos
 
 ```
-pip install torch scikit-learn sentence-transformers
+pip install torch scikit-learn chromadb
 ```
 
 ## Notas
 
-- El clasificador espera embeddings de la misma dimensionalidad y del mismo
-  encoder con el que fue entrenado (`{encoder_base}`). Usar un encoder distinto
-  produce predicciones sin sentido.
-- `label_mapping` y `clases_nombres` sirven para traducir la salida numérica
-  del clasificador de vuelta al nombre real de la clase.
+- NO uses `sentence-transformers` directamente para vectorizar texto nuevo:
+  aunque el modelo base es el mismo (`all-MiniLM-L6-v2`), el embedding
+  function por defecto de Chroma corre sobre ONNX Runtime y puede no dar
+  vectores idénticos. Usá siempre `embedding_functions.DefaultEmbeddingFunction()`
+  de `chromadb` para que la inferencia use el mismo espacio vectorial.
+- Si en algún momento el pipeline de ingesta cambia a un embedding function
+  explícito y distinto del default de Chroma, hay que actualizar tanto este
+  script como `EMBEDDING_MODEL_NAME` en el backend de entrenamiento.
+- `CLASES_NOMBRES` respeta el orden interno del `LabelEncoder` usado al
+  entrenar; no reordenar la lista.
 """
 
 
@@ -297,12 +344,16 @@ async def detectar_menciones(
         checkpoint_buffer.seek(0)
 
         readme_texto = generar_readme(
+            dataset_name=data.dataset,
             nombre_modelo=data.modelo,
             encoder_base=EMBEDDING_MODEL_NAME,
             label_mapping=label_mapping,
+            clases_nombres=clases_nombres,
             metricas=metricas,
             modo=data.modo,
             total_muestras=total_muestras,
+            muestras_train=muestras_train,
+            muestras_test=muestras_test,
         )
 
         zip_buffer = io.BytesIO()
