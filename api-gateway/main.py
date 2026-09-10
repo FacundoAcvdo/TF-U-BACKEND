@@ -21,7 +21,7 @@ SERVICES = {
     "emotions": os.getenv("EMOTIONS_SERVICE_URL"),
     "topicmodeling": os.getenv("TOPIC_MODELING_SERVICE_URL"),
     "wordcloud": os.getenv("WORDCLOUD_SERVICE_URL"),
-    "clasificacion": os.getenv("CLASIFICACION_SERVICE_URL"),
+    "classification": os.getenv("CLASSIFICATION_SERVICE_URL"),
 }
 
 @app.post("/auth/login")
