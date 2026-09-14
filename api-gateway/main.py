@@ -22,6 +22,7 @@ SERVICES = {
     "topicmodeling": os.getenv("TOPIC_MODELING_SERVICE_URL"),
     "wordcloud": os.getenv("WORDCLOUD_SERVICE_URL"),
     "classification": os.getenv("CLASSIFICATION_SERVICE_URL"),
+    "rag": os.getenv("RAG_SERVICE_URL"),
 }
 
 @app.post("/auth/login")

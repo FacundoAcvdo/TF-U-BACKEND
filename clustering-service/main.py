@@ -54,7 +54,6 @@ async def main(
 
     except Exception as e:
         print(f"Error al procesar el archivo: {str(e)}")
-        plt.close('all')
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
 
 @app.post("/getEmbeddingsImage")
