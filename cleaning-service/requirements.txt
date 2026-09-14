@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+supabase
+
+pandas
+openpyxl
+
+emoji
+spacy
