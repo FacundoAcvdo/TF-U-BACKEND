@@ -363,7 +363,6 @@ class CleaningService:
             ]
 
             self.dataset_storage_service.export_cleaned_dataset(
-                dataset=dataset,
                 documents=documents,
                 output_path=output_path,
             )

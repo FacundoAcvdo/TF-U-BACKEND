@@ -3,6 +3,10 @@ from pathlib import Path
 
 import pandas as pd
 
+_INTERNAL_METADATA_FIELDS = {
+    "formato_original",
+    "formato_detectado",
+}
 
 class DatasetStorageService:
 
@@ -51,7 +55,6 @@ class DatasetStorageService:
 
     def export_cleaned_dataset(
         self,
-        dataset: dict,
         documents: list[dict],
         output_path: Path,
     ) -> None:
@@ -63,8 +66,12 @@ class DatasetStorageService:
             row = {
                 "texto": document.get("texto"),
                 "clase": document.get("clase"),
-                "fecha": document.get("fecha"),
             }
+
+            fecha = document.get("fecha")
+
+            if fecha is not None:
+                row["fecha"] = fecha
 
             metadata = document.get(
                 "metadata",
@@ -72,7 +79,13 @@ class DatasetStorageService:
             )
 
             if isinstance(metadata, dict):
-                row.update(metadata)
+                row.update(
+                    {
+                        key: value
+                        for key, value in metadata.items()
+                        if key not in _INTERNAL_METADATA_FIELDS
+                    }
+                )
 
             rows.append(row)
 

@@ -54,13 +54,7 @@ class CleaningRequest(BaseModel):
 
     hashtag_strategy: HashtagStrategy = "keep"
 
-    # Opcional.
-    #
-    # Si no viene:
-    # - el dataset se considera bilingual/unknown
-    # - las operaciones independientes del idioma funcionan normalmente
-    # - lemmatization no se ejecuta
-    language: Language | None = None
+    language: Language = "bilingual"
 
 
 class CleaningStats(BaseModel):
@@ -105,5 +99,4 @@ class CleaningResponse(BaseModel):
 
     stats: CleaningStats
 
-    # Solamente textos que realmente cambiaron.
     previews: list[CleaningPreview]
