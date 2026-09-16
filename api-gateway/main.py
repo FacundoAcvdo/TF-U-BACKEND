@@ -24,6 +24,7 @@ SERVICES = {
     "classification": os.getenv("CLASSIFICATION_SERVICE_URL"),
     "rag": os.getenv("RAG_SERVICE_URL"),
     "datacleaning": os.getenv("DATA_CLEANING_SERVICE_URL"),
+    "evolution": os.getenv("EVOLUTION_SERVICE_URL"),
 }
 
 @app.post("/auth/login")
