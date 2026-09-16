@@ -25,6 +25,7 @@ class TopicModelingService:
         dataset_name: str,
         user_id: str,
         user_token: str,
+        max_topics: int=30,
     ) -> dict[str, Any]:
 
         dataset = await self.supabase.get_dataset_by_name(
@@ -41,6 +42,7 @@ class TopicModelingService:
         cached_result = await self.storage.get_topics(
             user_id=user_id,
             dataset_id=dataset_id,
+            max_topics=max_topics,
         )
 
         if cached_result is not None:
@@ -72,12 +74,14 @@ class TopicModelingService:
             documents=documents,
             embeddings=embeddings,
             document_ids=document_ids,
+            max_topics=max_topics,
         )
 
         await self.storage.save_topics(
             user_id=user_id,
             dataset_id=dataset_id,
             data=resultado,
+            max_topics=max_topics,
         )
 
         return resultado

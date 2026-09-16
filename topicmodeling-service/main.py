@@ -45,16 +45,17 @@ topic_modeling_service = TopicModelingService(
 @app.post("/getTopics")
 async def get_topics(
     dataset: str = Body(..., embed=True),
+    max_topics: int = Body(30, embed=True),
+
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
 ):
-    print(f"Obteniendo tópicos para dataset: {dataset}")
-
     try:
         resultado = await topic_modeling_service.get_topics(
             dataset_name=dataset,
             user_id=x_user_id,
             user_token=x_user_token,
+            max_topics=max_topics,
         )
 
         return {
@@ -82,7 +83,6 @@ async def get_topics(
         ) from exc
 
     except Exception as exc:
-        print(f"Error ejecutando topic modeling: {exc}")
 
         raise HTTPException(
             status_code=500,
