@@ -20,20 +20,7 @@ except LookupError:
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
-STOPWORDS_NLTK = set(stopwords.words('spanish')).union(set(stopwords.words('english')))
-
-JERGA_CHAT = {
-    "jaja", "jajaja", "jaj", "jajaj", "jajajaja", "ja", "ok", "dale", "che", "vos", 
-    "usted", "ustedes", "ah", "eh", "mm", "mmm", "ehh", "ay", "wow", "oh", "asi", 
-    "así", "aca", "acá", "ahi", "ahí", "alli", "allí", "solo", "sólo", "pues", 
-    "bueno", "bien", "vez", "veces", "cada", "cosa", "cosas", "si", "dijo", "dice", 
-    "digo", "decir", "hacer", "hace", "hizo", "haciendo", "puede", "pueden", "puedo", 
-    "podemos", "va", "voy", "vas", "vamos", "van", "tengo", "tienes", "tiene", 
-    "tenemos", "tenéis", "tienen", "yeah", "yes", "nope", "haha", "lol", "idk", 
-    "okay", "omg", "im", "ur", "u", "thx", "thanks", "pls", "please", "rt",
-}
-
-STOPWORDS = STOPWORDS_NLTK.union(JERGA_CHAT)
+STOPWORDS= set(stopwords.words('spanish')).union(set(stopwords.words('english')))
 
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 TOKEN_RE = re.compile(r"[a-záéíóúñü]{3,}", re.IGNORECASE)
@@ -244,11 +231,6 @@ async def obtener_usuarios(
 
         conteo = pd.Series(remitentes_raw).value_counts()
 
-        if len(conteo) < 2: # puede analizar una persona su propio chat. Pero creo que lo toma como dos personas
-            raise HTTPException(
-                status_code=422,
-                detail=f"Este chat solo tiene un participante ('{conteo.index[0]}'). Se necesitan al menos 2 para comparar.",
-            )
 
         return {
             "usuarios": [
