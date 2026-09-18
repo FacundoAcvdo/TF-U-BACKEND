@@ -31,8 +31,7 @@ import torch
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-EMBEDDING_MODEL_NAME = "chromadb-default (all-MiniLM-L6-v2, ONNX)"
-
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 app = FastAPI()
 
 origins = ["http://localhost:8080", "http://localhost:3000", "http://127.0.0.1:3000"]
@@ -96,7 +95,7 @@ def instanciar_clasificador(nombre: str):
 def procesar_etiquetas_automatico(metadatas: list[dict]):
     if not metadatas:
         raise HTTPException(status_code=400, detail="No se encontraron metadatos en ChromaDB.")
-    
+
     valores_raw = [str(meta.get("clase", "")).strip() for meta in metadatas]
     faltantes = sum(1 for v in valores_raw if v == "")
 
@@ -104,9 +103,9 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Este dataset tiene {faltantes} mensaje(s) sin clase asignada. "
+                f"Este dataset tiene {faltantes} texto(s) sin clase asignada. "
                 f"No se puede clasificar hasta "
-                f"que todos los mensajes estén etiquetados."
+                f"que todos los textos estén etiquetados."
             ),
         )
 
@@ -132,7 +131,6 @@ def procesar_etiquetas_automatico(metadatas: list[dict]):
         )
 
     label_mapping = {clase: int(idx) for idx, clase in enumerate(clases_unicas)}
-    print(f"[CLASIFICACION] Clases detectadas automáticamente: {label_mapping}")
 
     return y, label_mapping, clases_unicas
 
@@ -186,34 +184,33 @@ def generar_readme(
 
 ## Cómo usar este modelo para clasificar texto nuevo
 
-⚠️ Los embeddings con los que se entrenó este modelo salieron del
-**embedding function por defecto de ChromaDB** (basado en `all-MiniLM-L6-v2`,
-corrido con ONNX Runtime), NO de cargar ese modelo directamente con la
-librería `sentence-transformers`. Aunque es el mismo modelo base, el runtime
-ONNX de Chroma puede no dar vectores idénticos byte a byte a los de
-`sentence-transformers`. Para evitar mismatches, usá el mismo embedder de
-Chroma también para vectorizar texto nuevo:
+Los embeddings con los que se entrenó este modelo salieron de
+`sentence-transformers/all-MiniLM-L6-v2`, cargado directo con la librería
+`sentence-transformers` y con `normalize_embeddings=True` (así es como lo
+usa el pipeline de ingesta real — ver `dataset-service/embeddings.py`,
+`LocalSentenceTransformerProvider`). Para clasificar texto nuevo hay que
+vectorizarlo exactamente igual:
 
 ```python
 import torch
-from chromadb.utils import embedding_functions
+from sentence_transformers import SentenceTransformer
 
 # Datos de este modelo (dataset: {dataset_name}, modelo: {nombre_modelo})
+ENCODER_BASE = "{encoder_base}"
 CLASES_NOMBRES = {clases_literal}
 
 # 1. Cargar el checkpoint entrenado
 checkpoint = torch.load("modelo.pt", weights_only=False)
 clf = checkpoint["clasificador"]
 
-# 2. Usar el MISMO embedder por defecto de Chroma (para que el vector caiga
-#    en el mismo espacio que se usó al entrenar)
-embedder = embedding_functions.DefaultEmbeddingFunction()
+# 2. Cargar el MISMO encoder usado al entrenar, con la misma normalización
+encoder = SentenceTransformer(ENCODER_BASE)
 
 # 3. Vectorizar el/los texto(s) nuevo(s)
 textos = [
     "texto de ejemplo a clasificar",
 ]
-embeddings = embedder(textos)
+embeddings = encoder.encode(textos, normalize_embeddings=True)
 
 # 4. Predecir
 prediccion_id = clf.predict(embeddings)
@@ -229,19 +226,19 @@ for texto, clase in zip(textos, prediccion_clase):
 ## Requisitos
 
 ```
-pip install torch scikit-learn chromadb
+pip install torch scikit-learn sentence-transformers
 ```
 
 ## Notas
 
-- NO uses `sentence-transformers` directamente para vectorizar texto nuevo:
-  aunque el modelo base es el mismo (`all-MiniLM-L6-v2`), el embedding
-  function por defecto de Chroma corre sobre ONNX Runtime y puede no dar
-  vectores idénticos. Usá siempre `embedding_functions.DefaultEmbeddingFunction()`
-  de `chromadb` para que la inferencia use el mismo espacio vectorial.
-- Si en algún momento el pipeline de ingesta cambia a un embedding function
-  explícito y distinto del default de Chroma, hay que actualizar tanto este
-  script como `EMBEDDING_MODEL_NAME` en el backend de entrenamiento.
+- Los embeddings se generan con `sentence-transformers/all-MiniLM-L6-v2`
+  (carga directa de la librería, no el embedding function por defecto de
+  Chroma) y con `normalize_embeddings=True`. Usar un encoder distinto, o
+  sin la normalización, da vectores en otro espacio y predicciones sin
+  sentido.
+- Si el pipeline de ingesta (`dataset-service`) cambia de encoder en el
+  futuro, hay que actualizar tanto este script como `EMBEDDING_MODEL_NAME`
+  en el backend de entrenamiento.
 - `CLASES_NOMBRES` respeta el orden interno del `LabelEncoder` usado al
   entrenar; no reordenar la lista.
 """

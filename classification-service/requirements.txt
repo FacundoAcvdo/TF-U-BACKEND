@@ -7,3 +7,4 @@ pandas
 torch --extra-index-url https://download.pytorch.org/whl/cpu
 chromadb
 supabase
+pip install transformers accelerate
