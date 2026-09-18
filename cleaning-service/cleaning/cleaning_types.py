@@ -7,7 +7,7 @@ CleaningOperation = Literal[
     "lowercase",
     "remove_urls",
     "remove_mentions",
-    "remove_html",
+    "truncation",
     "normalize_whitespace",
     "remove_duplicates",
     "handle_hashtags",
@@ -71,7 +71,6 @@ class CleaningStats(BaseModel):
 
     removed_urls: int = 0
     removed_mentions: int = 0
-    removed_html: int = 0
 
     normalized_whitespace: int = 0
 
@@ -81,6 +80,7 @@ class CleaningStats(BaseModel):
     punctuation_removed: int = 0
     stopwords_removed: int = 0
 
+    truncated_words: int = 0
     lemmas_processed: int = 0
     entities_anonymized: int = 0
 
