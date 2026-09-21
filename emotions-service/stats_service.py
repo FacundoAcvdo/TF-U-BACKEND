@@ -12,6 +12,8 @@ def _compute_series_stats(series: pd.Series) -> Dict[str, float]:
         "min": float(s.min() if len(s) > 0 else 0.0),
         "max": float(s.max() if len(s) > 0 else 0.0),
         "median": float(s.median() if len(s) > 0 else 0.0),
+        "q25": float(s.quantile(0.25) if len(s) > 0 else 0.0),
+        "q75": float(s.quantile(0.75) if len(s) > 0 else 0.0),
         "sum": float(s.sum()),
     }
 

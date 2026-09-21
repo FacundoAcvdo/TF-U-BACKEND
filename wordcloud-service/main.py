@@ -2,24 +2,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
-import matplotlib
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
-
-import uuid
-import io
 import os
 import re
 import json
 from pathlib import Path
+from collections import Counter
 
 from nltk.corpus import stopwords
 
 from supabase import create_client
-from storage3 import create_client as create_storage_client
-
-from wordcloud import WordCloud
 
 class WordCloudRequest(BaseModel):
     dataset: str
@@ -50,31 +41,126 @@ def get_supabase_client(user_jwt: str):
     client.postgrest.auth(user_jwt)
     return client
 
-def get_storage_client(user_jwt: str):
-    storage_url = f"{SUPABASE_URL}/storage/v1"
-    headers = {
-        "apiKey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {user_jwt}",
+def save_wordcloud_results(supabase, user_id: str, dataset_id: str, frequencies: list, total_words: int, unique_words: int, max_count: int, min_count: int, documents_processed: int):
+    payload = {
+        "dataset_id": dataset_id,
+        "user_id": user_id,
+        "frequencies": frequencies,
+        "total_words": total_words,
+        "unique_words": unique_words,
+        "max_count": max_count,
+        "min_count": min_count,
+        "documents_processed": documents_processed,
     }
-    return create_storage_client(storage_url, headers, is_async=False)
+    try:
+        supabase.table("wordcloud_results").upsert(payload, on_conflict="dataset_id,user_id").execute()
+    except Exception:
+        try:
+            supabase.table("wordcloud_results").delete().eq("dataset_id", dataset_id).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+        supabase.table("wordcloud_results").insert(payload).execute()
+
+def get_wordcloud_results(supabase, user_id: str, dataset_id: str):
+    response = (
+        supabase.table("wordcloud_results")
+        .select("frequencies, total_words, unique_words, max_count, min_count, documents_processed")
+        .eq("dataset_id", dataset_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="No wordcloud results found for this dataset")
+    row = response.data[0]
+    return {
+        "frequencies": row["frequencies"],
+        "total_words": row["total_words"],
+        "unique_words": row["unique_words"],
+        "max_count": row["max_count"],
+        "min_count": row["min_count"],
+        "documents_processed": row["documents_processed"],
+    }
 
 def limpiar_texto(texto: str) -> str:
     texto = texto.lower()
-
     texto = re.sub(r"\b\d+\b", " ", texto)
-
     texto = re.sub(r"[^a-záéíóúüñ\s]", " ", texto)
-
     palabras = texto.split()
-
     palabras = [
         palabra
         for palabra in palabras
         if palabra not in STOPWORDS
         and len(palabra) > 2
     ]
-
     return " ".join(palabras)
+
+def build_wordcloud_data(textos_limpios: list[str], max_words: int = 200):
+    # tokens globales
+    all_tokens = []
+    # doc frequency por palabra
+    doc_freq = Counter()
+    for t in textos_limpios:
+        tokens = t.split()
+        all_tokens.extend(tokens)
+        # doc frequency: unique por doc
+        doc_freq.update(set(tokens))
+
+    total_words = len(all_tokens)
+    counter = Counter(all_tokens)
+    unique_words = len(counter)
+
+    most_common = counter.most_common(max_words)
+    if not most_common:
+        return {
+            "total_words": 0,
+            "unique_words": 0,
+            "frequencies": [],
+            "max_count": 0,
+            "min_count": 0,
+        }
+
+    max_count = most_common[0][1]
+    min_count = most_common[-1][1]
+
+    frequencies = []
+    for rank, (word, count) in enumerate(most_common, 1):
+        percentage = (count / total_words * 100) if total_words else 0
+        df = doc_freq.get(word, 0)
+        frequencies.append({
+            "text": word,
+            "value": count,  # compat con wordcloud libs
+            "count": count,
+            "percentage": round(percentage, 2),
+            "doc_frequency": df,
+            "doc_percentage": round((df / len(textos_limpios) * 100) if textos_limpios else 0, 1),
+            "rank": rank,
+        })
+
+    return {
+        "total_words": total_words,
+        "unique_words": unique_words,
+        "frequencies": frequencies,
+        "max_count": max_count,
+        "min_count": min_count,
+    }
+
+def load_and_process_dataset(x_user_id: str, dataset_id: str):
+    dataset_file = Path("./data/datasets") / "users" / x_user_id / f"{dataset_id}.json"
+    if not dataset_file.exists():
+        raise HTTPException(status_code=404, detail=f"Dataset file not found: {dataset_file}")
+    with open(dataset_file, "r", encoding="utf-8") as f:
+        dataset_json = json.load(f)
+    documents = dataset_json.get("documents", [])
+    textos = []
+    for document in documents:
+        texto = document.get("texto", "").strip()
+        if texto:
+            textos.append(limpiar_texto(texto))
+    texto_completo = " ".join(textos)
+    if not texto_completo.strip():
+        raise HTTPException(status_code=400, detail="The dataset does not contain usable text.")
+    return textos, len(textos)
 
 @app.post("/visualizeWordCloud")
 async def createWordCloud(
@@ -84,7 +170,6 @@ async def createWordCloud(
 ):
     try:
         supabase = get_supabase_client(x_user_token)
-        storage = get_storage_client(x_user_token)
 
         response = (
             supabase
@@ -96,134 +181,37 @@ async def createWordCloud(
         )
 
         if not response.data:
-            print(f"Dataset not found for user {x_user_id} and dataset {data.dataset}")
-            raise HTTPException(
-                status_code=404,
-                detail="Dataset not found or access denied."
-            )
-
-        print(f"Dataset info: {response.data[0]}")
+            raise HTTPException(status_code=404, detail="Dataset not found or access denied.")
 
         dataset_info = response.data[0]
         dataset_id = dataset_info.get("dataset_id")
-
         if not dataset_id:
-            print(f"Dataset does not have a dataset_id for user {x_user_id} and dataset {data.dataset}")
-            raise HTTPException(
-                status_code=500,
-                detail="Dataset does not have a dataset_id."
+            raise HTTPException(status_code=500, detail="Dataset does not have a dataset_id.")
+
+        textos_limpios, docs_processed = load_and_process_dataset(x_user_id, dataset_id)
+
+        wc_data = build_wordcloud_data(textos_limpios, max_words=200)
+
+        try:
+            save_wordcloud_results(
+                supabase, x_user_id, dataset_id,
+                wc_data["frequencies"], wc_data["total_words"], wc_data["unique_words"],
+                wc_data["max_count"], wc_data["min_count"], docs_processed
             )
-
-        print(f"Looking for dataset directory for user {x_user_id} and dataset_id {dataset_id}")
-
-        dataset_file = (
-            Path("./data/datasets") / "users" / x_user_id / f"{dataset_id}.json"
-        )
-
-        print(f"Constructed dataset file path: {dataset_file}")
-
-        if not dataset_file.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"Dataset file not found: {dataset_file}"
-            )
-
-        print(f"Dataset file: {dataset_file}")
-
-        with open(dataset_file, "r", encoding="utf-8") as f:
-            dataset_json = json.load(f)
-
-        documents = dataset_json.get("documents", [])
-
-        textos = []
-
-        for document in documents:
-            texto = document.get("texto", "").strip()
-
-            if texto:
-                textos.append(limpiar_texto(texto))
-
-        texto_completo = " ".join(textos)
-
-        if not texto_completo.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="The dataset does not contain usable text."
-            )
-
-        wordcloud = WordCloud(
-            width=2400,
-            height=1200,
-            background_color="white",
-            max_words=200,
-            collocations=False,
-            stopwords=STOPWORDS,
-            colormap="viridis",
-            font_path="./Inter_24pt-SemiBold.ttf",
-            prefer_horizontal=0.9,
-        ).generate(texto_completo)
-
-        plt.figure(figsize=(12, 6), dpi=200)
-        plt.imshow(wordcloud, interpolation="bilinear")
-        plt.axis("off")
-        plt.title("")
-
-        buffer = io.BytesIO()
-
-        plt.savefig(
-            buffer,
-            format="png",
-            dpi=150,
-            bbox_inches="tight"
-        )
-
-        plt.close()
-        buffer.seek(0)
-
-        imagen_bytes = buffer.read()
-
-        image_name = f"{x_user_id}/{uuid.uuid4()}.png"
-
-        storage.from_("imagenes-generadas").upload(
-            path=image_name,
-            file=imagen_bytes,
-            file_options={
-                "content-type": "image/png"
-            }
-        )
-
-        public_url = (
-            f"http://127.0.0.1:54321/"
-            f"storage/v1/object/public/"
-            f"imagenes-generadas/{image_name}"
-        )
-
-        supabase.table("imagenes-generadas").insert({
-            "user_id": x_user_id,
-            "dataset_id": dataset_id,
-            "function_name": "wordcloud",
-            "public_url": public_url,
-            "image_path": image_name,
-        }).execute()
+        except Exception as e:
+            print(f"[wordcloud-service] warn save_wordcloud_results: {e}")
 
         return {
-            "public_url": public_url,
             "dataset_id": dataset_id,
-            "documents_processed": len(textos),
+            "documents_processed": docs_processed,
+            **wc_data,
         }
 
     except HTTPException:
-        plt.close("all")
         raise
-
     except Exception as e:
-        print(f"Error al procesar el archivo: {str(e)}")
-        plt.close("all")
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al procesar el archivo: {str(e)}"
-        )
+        print(f"Error al procesar wordcloud: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al procesar wordcloud: {str(e)}")
 
 @app.post("/getWordCloudImage")
 async def getWordCloudImage(
@@ -233,7 +221,8 @@ async def getWordCloudImage(
 ):
     try:
         supabase = get_supabase_client(x_user_token)
-
+        if data is None or not data.dataset:
+            raise HTTPException(status_code=400, detail="Dataset is required")
         response = (
             supabase
             .table("datasets")
@@ -242,31 +231,13 @@ async def getWordCloudImage(
             .eq("user_id", x_user_id)
             .execute()
         )
-
         if not response.data:
             raise HTTPException(status_code=404, detail="Dataset not found for the user.")
-
         dataset_id = response.data[0].get("dataset_id")
-
-        response = (
-            supabase
-            .table("imagenes-generadas")
-            .select("public_url")
-            .eq("user_id", x_user_id)
-            .eq("function_name", "wordcloud")
-            .eq("dataset_id", dataset_id)
-            .limit(1)
-            .execute()
-        )
-
-        if not response.data:
-            raise HTTPException(status_code=404, detail="No word cloud image found for the user.")
-
-        image_info = response.data[0]
-        public_url = image_info.get("public_url")
-
-        return {"public_url": public_url}
-
+        data_db = get_wordcloud_results(supabase, x_user_id, dataset_id)
+        return {"dataset_id": dataset_id, **data_db}
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error al obtener la imagen de clustering: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener la imagen de clustering: {str(e)}")
+        print(f"Error al obtener wordcloud: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener wordcloud: {str(e)}")

@@ -13,7 +13,7 @@ def get_dataset_row_analysis(dataset: pd.DataFrame) -> pd.DataFrame:
     return dataset
 
 def get_estadisticas_corpus(dataset: pd.DataFrame) -> pd.DataFrame:
-    vect = CountVectorizer(token_pattern='[\/\%]+').fit(dataset['texto'])
+    vect = CountVectorizer().fit(dataset['texto'])
     cant_texto = int(dataset.shape[0])
     tam_vocab = len(vect.vocabulary_)
     cant_palabras = dataset['words'].sum()

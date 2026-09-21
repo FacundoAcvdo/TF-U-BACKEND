@@ -1,7 +1,5 @@
-from storage3 import create_client as create_storage_client
 from supabase import create_client
 from fastapi import HTTPException
-import uuid
 import os
 
 ##########
@@ -15,14 +13,6 @@ def get_supabase_client(user_jwt: str):
     client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     client.postgrest.auth(user_jwt)
     return client
-
-def get_storage_client(user_jwt: str):
-    storage_url = f"{SUPABASE_URL}/storage/v1"
-    headers = {
-        "apiKey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {user_jwt}",
-    }
-    return create_storage_client(storage_url, headers, is_async=False)
 
 def get_dataset_info(supabase, dataset_name: str, user_id: str):
     response = (
@@ -39,42 +29,44 @@ def get_dataset_info(supabase, dataset_name: str, user_id: str):
 
     return response.data[0] if response.data else None
 
-def upload_image_to_bucket(storage, image_bytes, user_id):
-    image_name = f"{user_id}/{uuid.uuid4()}.png"
-    storage.from_("imagenes-generadas").upload(
-        path=image_name,
-        file=image_bytes,
-        file_options={"content-type": "image/png"}
-    )
-    return image_name
-
-def upload_image_info(supabase, image_name, user_id, dataset_id):
-    #public_url = storage.from_("imagenes-generadas").get_public_url(image_name) - Se debería activar en producción
-    public_url = f"http://127.0.0.1:54321/storage/v1/object/public/imagenes-generadas/{image_name}"
-
-    supabase.table("imagenes-generadas").insert({
-        "user_id": user_id,
+def save_clustering_results(supabase, user_id: str, dataset_id: str, points: list, clusters: list, total: int, displayed: int, outliers: int, truncated: bool):
+    payload = {
         "dataset_id": dataset_id,
-        "function_name": "clustering",
-        "public_url": public_url,
-        "image_path": image_name,
-    }).execute()
+        "user_id": user_id,
+        "points": points,
+        "clusters": clusters,
+        "total": total,
+        "displayed": displayed,
+        "outliers": outliers,
+        "truncated": truncated,
+    }
+    try:
+        supabase.table("clustering_results").upsert(payload, on_conflict="dataset_id,user_id").execute()
+    except Exception:
+        try:
+            supabase.table("clustering_results").delete().eq("dataset_id", dataset_id).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+        supabase.table("clustering_results").insert(payload).execute()
 
-    return {"public_url": public_url}
-
-def get_cluster_image(supabase, user_id : str, dataset_id: str):
+def get_clustering_results(supabase, user_id: str, dataset_id: str):
     response = (
         supabase
-        .table("imagenes-generadas")
-        .select("public_url")
-        .eq("user_id", user_id)
-        .eq("function_name", "clustering")
+        .table("clustering_results")
+        .select("points, clusters, total, displayed, outliers, truncated")
         .eq("dataset_id", dataset_id)
+        .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
-
     if not response.data:
-        raise HTTPException(status_code=404, detail="No clustering image found for the user.")
-
-    return response.data[0].get("public_url")
+        raise HTTPException(status_code=404, detail="No clustering results found for this dataset")
+    row = response.data[0]
+    return {
+        "points": row["points"],
+        "clusters": row["clusters"],
+        "total": row["total"],
+        "displayed": row["displayed"],
+        "outliers": row["outliers"],
+        "truncated": row["truncated"],
+    }
