@@ -18,7 +18,11 @@ class Settings(BaseSettings):
     chroma_token: str = ""
     chroma_collection_name: str = "documents"
 
-    dataset_storage_path: str = ""
+    google_api_key: str = ""
+    llm_model: str = "gemini-2.0-flash"
+    title_enabled: bool = True
+    title_batch_size: int = 20
+    title_max_chars_per_doc: int = 400
 
     model_config = SettingsConfigDict(
         env_file=".env",

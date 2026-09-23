@@ -1,7 +1,7 @@
-from typing import Any
+from typing import Any, Optional
 from chroma_service import ChromaService
-from storage_service import StorageService
 from supabase_service import SupabaseService
+from title_provider import TitleProvider
 from topic_modeling_provider import TopicModelingProvider
 
 
@@ -12,12 +12,12 @@ class TopicModelingService:
         supabase_repository: SupabaseService,
         chroma_repository: ChromaService,
         topic_provider: TopicModelingProvider,
-        storage_service: StorageService,
+        title_provider: Optional[TitleProvider] = None,
     ) -> None:
         self.supabase = supabase_repository
         self.chroma = chroma_repository
         self.topic_provider = topic_provider
-        self.storage = storage_service
+        self.title_provider = title_provider
 
     async def get_topics(
         self,
@@ -39,14 +39,22 @@ class TopicModelingService:
 
         dataset_id = dataset["dataset_id"]
 
-        cached_result = await self.storage.get_topics(
+        cached_result = await self.supabase.get_topic_results(
             user_id=user_id,
             dataset_id=dataset_id,
             max_topics=max_topics,
+            user_token=user_token,
         )
 
         if cached_result is not None:
-            return cached_result
+            enriched = await self._ensure_titles(
+                resultado=cached_result,
+                user_id=user_id,
+                dataset_id=dataset_id,
+                max_topics=max_topics,
+                user_token=user_token,
+            )
+            return enriched
 
         chroma_data = await self.chroma.get_dataset_documents(
             dataset_id=dataset_id,
@@ -77,11 +85,109 @@ class TopicModelingService:
             max_topics=max_topics,
         )
 
-        await self.storage.save_topics(
-            user_id=user_id,
-            dataset_id=dataset_id,
-            data=resultado,
-            max_topics=max_topics,
-        )
+        resultado = await self._apply_titles(resultado)
+
+        try:
+            await self.supabase.save_topic_results(
+                user_id=user_id,
+                dataset_id=dataset_id,
+                max_topics=max_topics,
+                resultado=resultado,
+                user_token=user_token,
+            )
+        except Exception as exc:
+            print(
+                "[TopicModelingService] No se pudo guardar en "
+                f"Supabase: {exc}"
+            )
 
         return resultado
+
+    async def get_cached_topics(
+        self,
+        *,
+        dataset_name: str,
+        user_id: str,
+        user_token: str,
+        max_topics: int = 30,
+    ) -> dict[str, Any] | None:
+        """Solo lee Supabase. No calcula ni llama a Gemini."""
+        dataset = await self.supabase.get_dataset_by_name(
+            dataset_name=dataset_name,
+            user_id=user_id,
+            user_token=user_token,
+        )
+
+        if not dataset:
+            raise LookupError(f"No se encontró el dataset '{dataset_name}'.")
+
+        return await self.supabase.get_topic_results(
+            user_id=user_id,
+            dataset_id=dataset["dataset_id"],
+            max_topics=max_topics,
+            user_token=user_token,
+        )
+
+    async def _apply_titles(
+        self,
+        resultado: dict[str, Any],
+    ) -> dict[str, Any]:
+        topics = resultado.get("topics", [])
+
+        if self.title_provider is None:
+            for topic in topics:
+                topic.setdefault(
+                    "title",
+                    TitleProvider.fallback_title(topic.get("keywords", [])),
+                )
+                topic.setdefault("title_source", "keywords")
+            return resultado
+
+        titles = await self.title_provider.generate_titles(topics)
+
+        for topic in topics:
+            topic_id = int(topic["topic_id"])
+            if topic_id in titles:
+                topic["title"] = titles[topic_id]
+                topic["title_source"] = "llm"
+            else:
+                topic["title"] = TitleProvider.fallback_title(
+                    topic.get("keywords", [])
+                )
+                topic["title_source"] = (
+                    "keywords"
+                    if self.title_provider.is_available
+                    else "disabled"
+                )
+
+        return resultado
+
+    async def _ensure_titles(
+        self,
+        *,
+        resultado: dict[str, Any],
+        user_id: str,
+        dataset_id: str,
+        max_topics: int,
+        user_token: str,
+    ) -> dict[str, Any]:
+        """Etiqueta cachés viejos que no tienen `title` y los re-graba."""
+        topics = resultado.get("topics", [])
+
+        if topics and all("title" in topic for topic in topics):
+            return resultado
+
+        updated = await self._apply_titles(resultado)
+
+        try:
+            await self.supabase.save_topic_results(
+                user_id=user_id,
+                dataset_id=dataset_id,
+                max_topics=max_topics,
+                resultado=updated,
+                user_token=user_token,
+            )
+        except Exception as exc:
+            print(f"[TopicModelingService] No se pudo re-grabar caché con títulos: {exc}")
+
+        return updated
