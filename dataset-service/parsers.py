@@ -1,12 +1,104 @@
 import io
 import os
+import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import polars as pl
 
 from models import Document
+
+
+def _normalizar_fecha_a_iso(valor: Any, formato_fecha: str | None) -> str | None:
+    """Convierte cualquier valor de fecha a YYYY-MM-DD.
+
+    Si formato_fecha es DMY/MDY/YMD y el valor contiene '/', se respeta ese orden.
+    Si no, intenta parseo robusto con pandas y falla con ValueError si es inválida.
+    """
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None
+
+    # Si ya es datetime / Timestamp / date
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        try:
+            dt = pd.to_datetime(valor)
+            if pd.isna(dt):
+                return None
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    # Polars puede entregar date objects
+    if hasattr(valor, "isoformat") and not isinstance(valor, str):
+        try:
+            s = str(valor)
+            dt = pd.to_datetime(s, errors="coerce")
+            if pd.isna(dt):
+                return None
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    s = str(valor).strip()
+    if not s:
+        return None
+
+    # Ya ISO YYYY-MM-DD o con hora
+    m_iso = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m_iso:
+        try:
+            dt = pd.to_datetime(s, errors="coerce")
+            if pd.isna(dt):
+                raise ValueError(f"Fecha ISO inválida: {s}")
+            return dt.strftime("%Y-%m-%d")
+        except Exception as e:
+            raise ValueError(f"Fecha inválida '{s}': {e}") from e
+
+    # Con barras: usar formatoFecha explícito si viene del front
+    if "/" in s and formato_fecha in ("DMY", "MDY", "YMD"):
+        # tomar solo la parte de fecha antes de espacio/coma
+        fecha_part = re.split(r"[\s,]+", s)[0]
+        parts = fecha_part.split("/")
+        if len(parts) == 3:
+            try:
+                nums = [int(p.strip()) for p in parts]
+            except ValueError:
+                raise ValueError(f"Fecha con barras inválida: {s}")
+            if formato_fecha == "DMY":
+                d, m, y = nums
+            elif formato_fecha == "MDY":
+                m, d, y = nums
+            else:  # YMD
+                y, m, d = nums
+            if y < 100:
+                y += 2000
+            # validación básica
+            if not (1 <= m <= 12 and 1 <= d <= 31):
+                raise ValueError(
+                    f"Fecha '{s}' con formato {formato_fecha} da mes={m} día={d} inválido. "
+                    f"¿Seleccionaste el formato correcto? (DMY=13/08/2026, MDY=08/13/2026)"
+                )
+            try:
+                dt = datetime(y, m, d)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(f"Fecha inválida '{s}' ({formato_fecha}): {e}") from e
+
+    # Fallback genérico: intentar con pandas mixed (dayfirst según formato)
+    # Si formato es MDY, dayfirst=False; DMY -> True
+    dayfirst = True if formato_fecha in (None, "DMY") else False if formato_fecha == "MDY" else False
+    # YMD ya manejado, pero por si acaso
+    try:
+        dt = pd.to_datetime(s, errors="coerce", format="mixed", dayfirst=dayfirst)
+        if pd.isna(dt):
+            # último intento sin format mixed
+            dt = pd.to_datetime(s, errors="coerce", dayfirst=dayfirst)
+        if pd.isna(dt):
+            raise ValueError(f"No se pudo parsear fecha '{s}' (formatoFecha={formato_fecha})")
+        return dt.strftime("%Y-%m-%d")
+    except Exception as e:
+        raise ValueError(f"Fecha inválida '{s}': {e}") from e
 
 
 class BaseDocumentParser(ABC):
@@ -19,6 +111,7 @@ class BaseDocumentParser(ABC):
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        formato_fecha: str | None = None,
     ) -> list[Document]:
 
         raise NotImplementedError
@@ -35,6 +128,7 @@ class DataFrameParser(
         columna_clase: str | None,
         columna_fecha: str | None,
         extra_metadata: dict[str, Any] | None,
+        formato_fecha: str | None = None,
     ) -> list[Document]:
 
         if columna_texto not in df.columns:
@@ -136,8 +230,9 @@ class DataFrameParser(
                 ]
 
                 if not pd.isna(value):
-
-                    fecha = str(value)
+                    # Normaliza siempre a YYYY-MM-DD; lanza ValueError si es inválida
+                    normalized = _normalizar_fecha_a_iso(value, formato_fecha)
+                    fecha = normalized
 
             documents.append(
                 Document(
@@ -169,6 +264,7 @@ class CSVParser(
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        formato_fecha: str | None = None,
     ) -> list[Document]:
 
         df = self._leer_csv(content)
@@ -179,6 +275,7 @@ class CSVParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            formato_fecha=formato_fecha,
         )
 
     def _leer_csv(
@@ -242,6 +339,7 @@ class XLSXParser(
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        formato_fecha: str | None = None,
     ) -> list[Document]:
 
         try:
@@ -262,6 +360,7 @@ class XLSXParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            formato_fecha=formato_fecha,
         )
 
 

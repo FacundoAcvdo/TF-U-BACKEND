@@ -45,6 +45,7 @@ class DatasetService:
         columna_fecha: str | None,
         formato_original: str | None,
         formato_detectado: str | None,
+        formato_fecha: str | None = None,
         user_id: str,
         user_token: str,
     ) -> DatasetInfo:
@@ -69,6 +70,7 @@ class DatasetService:
             columna_fecha=columna_fecha,
             formato_original=formato_original,
             formato_detectado=formato_detectado,
+            formato_fecha=formato_fecha,
         )
 
         dataset = self._build_dataset_document(
@@ -124,6 +126,7 @@ class DatasetService:
         columna_fecha: str | None,
         formato_original: str | None,
         formato_detectado: str | None,
+        formato_fecha: str | None = None,
     ) -> list[Document]:
 
         parser = ParserFactory.get_parser(
@@ -148,6 +151,7 @@ class DatasetService:
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            formato_fecha=formato_fecha,
         )
 
         if not documents:
@@ -295,7 +299,7 @@ class DatasetService:
 
         try:
 
-            await self.storage.delete(
+            await self.storage.delete_dataset(
                 user_id=dataset.user_id,
                 dataset_id=dataset.dataset_id,
             )

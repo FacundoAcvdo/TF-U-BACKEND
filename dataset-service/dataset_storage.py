@@ -104,11 +104,22 @@ class LocalJsonDatasetStorage(
             / user_id
         )
 
-        for dataset_file in user_path.glob("*.json"):
-            dataset_file.unlink(
-                missing_ok=True
-            )
+        if not user_path.exists():
+            return
 
-        user_path.rmdir(
-            missing_ok=True
-        )
+        for dataset_file in user_path.glob("*.json"):
+            try:
+                dataset_file.unlink(missing_ok=True)
+            except TypeError:
+                # Python <3.8 sin missing_ok
+                if dataset_file.exists():
+                    dataset_file.unlink()
+
+        # rmdir no tiene missing_ok en Python <3.12 -> manejar manualmente
+        try:
+            user_path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # directorio no vacío (o ya borrado) -> no es error
+            pass

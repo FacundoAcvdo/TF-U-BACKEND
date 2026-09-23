@@ -133,6 +133,10 @@ async def create_dataset(
         default=None
     ),
 
+    formatoFecha: str | None = Form(
+        default=None
+    ),
+
     context: Annotated[
         RequestContext,
         Depends(get_request_context),
@@ -201,6 +205,12 @@ async def create_dataset(
 
     try:
 
+        if formatoFecha and formatoFecha not in ("DMY", "MDY", "YMD"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"formatoFecha debe ser DMY, MDY o YMD, recibido: {formatoFecha}",
+            )
+
         dataset = (
             await dataset_service.create_dataset(
                 content=content,
@@ -210,6 +220,7 @@ async def create_dataset(
                 columna_fecha=columnaFecha,
                 formato_original=formatoOriginal,
                 formato_detectado=formatoDetectado,
+                formato_fecha=formatoFecha,
                 user_id=x_user_id,
                 user_token=x_user_token
             )
