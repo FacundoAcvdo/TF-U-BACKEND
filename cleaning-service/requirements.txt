@@ -9,3 +9,5 @@ openpyxl
 
 emoji
 spacy
+langdetect
+nltk

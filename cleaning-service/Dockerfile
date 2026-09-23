@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Modelos de spaCy para inglés y español
 RUN python -m spacy download en_core_web_sm \
-    && python -m spacy download es_core_news_sm
+    && python -m spacy download es_core_news_sm \
+    && python -m nltk.downloader punkt punkt_tab
 
 COPY . .
 

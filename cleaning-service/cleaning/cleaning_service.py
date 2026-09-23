@@ -2,6 +2,7 @@ import copy
 import tempfile
 
 from pathlib import Path
+from urllib import request
 
 from .cleaning_types import (
     CleaningRequest,
@@ -22,8 +23,8 @@ from .cleaners.mention_cleaning_service import (
     MentionCleaningService,
 )
 
-from .cleaners.html_cleaning_service import (
-    HtmlCleaningService,
+from .cleaners.truncation_cleaning_service import (
+    TruncationCleaningService,
 )
 
 from .cleaners.whitespace_cleaning_service import (
@@ -94,8 +95,8 @@ class CleaningService:
             "remove_mentions": (
                 MentionCleaningService()
             ),
-            "remove_html": (
-                HtmlCleaningService()
+            "truncation": (
+                TruncationCleaningService()
             ),
             "normalize_whitespace": (
                 WhitespaceCleaningService()
@@ -221,6 +222,44 @@ class CleaningService:
                     f"{operation}"
                 )
 
+            if operation == "lemmatization":
+
+                texts = [
+                    str(
+                        entry["document"].get(
+                            self.TEXT_FIELD
+                        )
+                        or ""
+                    )
+                    for entry in entries
+                ]
+
+                results = cleaner.clean_batch(
+                    texts=texts,
+                    language=request.language,
+                )
+
+                total_count = sum(
+                    result.count
+                    for result in results
+                )
+
+                for entry, result in zip(
+                    entries,
+                    results,
+                ):
+                    entry["document"][
+                        self.TEXT_FIELD
+                    ] = result.text
+
+                self._update_stats(
+                    stats=stats,
+                    operation=operation,
+                    count=total_count,
+                )
+
+                continue
+
             for entry in entries:
 
                 document = entry[
@@ -248,7 +287,7 @@ class CleaningService:
                         request.hashtag_strategy,
                     )
 
-                elif operation == "lemmatization":
+                elif operation == "truncation":
 
                     result = cleaner.clean(
                         text,
@@ -363,7 +402,6 @@ class CleaningService:
             ]
 
             self.dataset_storage_service.export_cleaned_dataset(
-                dataset=dataset,
                 documents=documents,
                 output_path=output_path,
             )
@@ -428,9 +466,6 @@ class CleaningService:
         elif operation == "remove_mentions":
             stats.removed_mentions += count
 
-        elif operation == "remove_html":
-            stats.removed_html += count
-
         elif operation == "normalize_whitespace":
             stats.normalized_whitespace += count
 
@@ -448,6 +483,9 @@ class CleaningService:
 
         elif operation == "lemmatization":
             stats.lemmas_processed += count
+
+        elif operation == "truncation":
+            stats.truncated_words += count
 
         elif operation == "anonymization":
             stats.entities_anonymized += count
