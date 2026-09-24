@@ -4,7 +4,6 @@ pydantic
 scikit-learn
 numpy
 pandas
-torch --extra-index-url https://download.pytorch.org/whl/cpu
 chromadb
 supabase
 transformers

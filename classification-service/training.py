@@ -1,0 +1,534 @@
+import inspect
+import io
+import os
+import shutil
+import tempfile
+import zipfile
+from datetime import datetime, timezone
+
+import numpy as np
+import torch
+from fastapi import HTTPException
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import (
+    StratifiedKFold,
+    cross_val_predict,
+    train_test_split,
+)
+from sklearn.naive_bayes import GaussianNB
+from sklearn.preprocessing import LabelEncoder
+from sklearn.svm import LinearSVC
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    DataCollatorWithPadding,
+    Trainer,
+    TrainingArguments,
+)
+
+from core import DEVICE, EMBEDDING_MODEL_NAME
+from schemas import TrainingRequest
+
+MAX_CLASES = int(os.environ.get("MAX_CLASES", 7))
+
+def instanciar_clasificador_sklearn(nombre: str):
+    if nombre == "Support Vector Machine":
+        return LinearSVC(random_state=42, max_iter=3000, class_weight="balanced")
+    if nombre == "Random Forest":
+        return RandomForestClassifier(
+            n_estimators=100, random_state=42, class_weight="balanced", n_jobs=-1
+        )
+    if nombre == "Naive Bayes":
+        return GaussianNB()
+    return LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")
+
+
+def procesar_etiquetas_automatico(valores_raw: list[str]):
+    if not valores_raw:
+        raise HTTPException(status_code=400, detail="No se encontraron metadatos en ChromaDB.")
+    faltantes = sum(1 for v in valores_raw if v == "")
+    if faltantes > 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Este dataset tiene {faltantes} texto(s) sin clase asignada. No se puede clasificar hasta que todos estén etiquetados.",
+        )
+    le = LabelEncoder()
+    y = le.fit_transform(valores_raw)
+    clases_unicas = list(le.classes_)
+    if len(clases_unicas) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El dataset contiene una única clase ('{clases_unicas[0]}'). Se requieren al menos dos para entrenar.",
+        )
+
+    if len(clases_unicas) > MAX_CLASES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Este dataset tiene {len(clases_unicas)} clases. "
+                f"El microservicio admite como máximo {MAX_CLASES} clases."
+            ),
+        )
+    label_mapping = {clase: int(idx) for idx, clase in enumerate(clases_unicas)}
+    return y, label_mapping, clases_unicas
+
+
+def validar_tamano_muestras(y_labels, data: TrainingRequest):
+    conteos = np.bincount(y_labels)
+
+    if len(conteos) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No hay muestras etiquetadas para entrenar.",
+        )
+
+    clase_minoritaria = int(conteos.min())
+    cantidad_clases = len(conteos)
+
+    if data.modelo == "BERT" and data.modo == "validacion_cruzada":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "BERT se entrena con un único conjunto de entrenamiento y prueba. "
+                "Seleccioná 'Entrenamiento y Prueba' para BERT."
+            ),
+        )
+
+    if data.modo == "validacion_cruzada":
+        k_folds = data.k if data.k in [5, 10] else 5
+
+        if clase_minoritaria < k_folds:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"La clase minoritaria tiene solo {clase_minoritaria} muestra(s), "
+                    f"pero se pidieron {k_folds} pliegues. Cada clase necesita al menos "
+                    f"{k_folds} muestras para validación cruzada."
+                ),
+            )
+        return
+
+    porcentaje_prueba = data.porcentaje_prueba or 50
+    test_size = max(0.1, min(0.9, porcentaje_prueba / 100.0))
+
+    if clase_minoritaria < 2:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"La clase minoritaria tiene solo {clase_minoritaria} muestra(s). "
+                "Se necesitan al menos 2 por clase para entrenamiento y prueba estratificados."
+            ),
+        )
+
+    total_muestras = len(y_labels)
+    cantidad_test = int(np.ceil(total_muestras * test_size))
+    cantidad_train = total_muestras - cantidad_test
+
+    if cantidad_test < cantidad_clases:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Hay {cantidad_clases} clases, pero el porcentaje de prueba genera "
+                f"solo {cantidad_test} muestra(s) para test. Necesitás al menos "
+                f"{cantidad_clases} muestras de prueba, una por cada clase."
+            ),
+        )
+
+    if cantidad_train < cantidad_clases:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Hay {cantidad_clases} clases, pero el porcentaje de entrenamiento "
+                f"deja solo {cantidad_train} muestra(s) para train. Necesitás al menos "
+                f"{cantidad_clases} muestras de entrenamiento, una por cada clase."
+            ),
+        )
+
+
+def calcular_metricas(y_true, y_pred, cantidad_clases: int):
+    labels = list(range(cantidad_clases))
+    matriz = confusion_matrix(y_true, y_pred, labels=labels)
+
+    acc = float(accuracy_score(y_true, y_pred))
+    f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+    prec = float(precision_score(y_true, y_pred, average="weighted", zero_division=0))
+    rec = float(recall_score(y_true, y_pred, average="weighted", zero_division=0))
+
+    if cantidad_clases == 2:
+        tn, fp, fn, tp = matriz.ravel()
+        return (
+            int(tp), int(fp), int(tn), int(fn),
+            acc, f1, prec, rec, matriz.tolist(),
+        )
+
+    total = int(matriz.sum())
+    tp = int(np.trace(matriz))
+    fp = int(np.sum(matriz.sum(axis=0) - np.diag(matriz)))
+    fn = int(np.sum(matriz.sum(axis=1) - np.diag(matriz)))
+
+    tn_por_clase = []
+    for i in range(cantidad_clases):
+        tp_i = int(matriz[i, i])
+        fn_i = int(matriz[i, :].sum() - tp_i)
+        fp_i = int(matriz[:, i].sum() - tp_i)
+        tn_por_clase.append(total - tp_i - fn_i - fp_i)
+
+    tn = int(sum(tn_por_clase))
+
+    return (
+        tp, fp, tn, fn,
+        acc, f1, prec, rec, matriz.tolist(),
+    )
+
+
+def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
+    total_muestras = len(y_labels)
+    cantidad_clases = len(clases_nombres)
+    clf = instanciar_clasificador_sklearn(data.modelo)
+
+    if data.modo == "validacion_cruzada":
+        k_folds = data.k if data.k in [5, 10] else 5
+        skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+
+        y_pred = cross_val_predict(
+            clf,
+            x_vectors,
+            y_labels,
+            cv=skf,
+            n_jobs=-1,
+        )
+        y_eval = y_labels
+
+        clf.fit(x_vectors, y_labels)
+        muestras_train = total_muestras
+        muestras_test = total_muestras
+    else:
+        porcentaje_prueba = data.porcentaje_prueba or 50
+        test_size = max(0.1, min(0.9, porcentaje_prueba / 100.0))
+
+        x_train, x_test, y_train, y_test = train_test_split(
+            x_vectors,
+            y_labels,
+            test_size=test_size,
+            random_state=42,
+            stratify=y_labels,
+        )
+
+        clf.fit(x_train, y_train)
+        y_pred = clf.predict(x_test)
+        y_eval = y_test
+        muestras_train = len(y_train)
+        muestras_test = len(y_test)
+
+    (
+        tp, fp, tn, fn,
+        acc, f1, prec, rec,
+        matriz,
+    ) = calcular_metricas(y_eval, y_pred, cantidad_clases)
+
+    checkpoint_buffer = io.BytesIO()
+    checkpoint = {
+        "clasificador": clf,
+        "encoder_base": EMBEDDING_MODEL_NAME,
+        "label_mapping": label_mapping,
+        "clases_nombres": clases_nombres,
+        "matriz_confusion": matriz,
+        "num_clases": cantidad_clases,
+        "accuracy": acc,
+        "f1_score": f1,
+        "precision": prec,
+        "recall": rec,
+    }
+    torch.save(checkpoint, checkpoint_buffer)
+    checkpoint_buffer.seek(0)
+
+    fecha = datetime.now(timezone.utc).isoformat()
+    mapping_lines = "\n".join(
+        f"- `{clase}` → `{idx}`"
+        for clase, idx in label_mapping.items()
+    )
+    matriz_tabla = (
+        "| Real / Predicha | "
+        + " | ".join(str(i) for i in range(cantidad_clases))
+        + " |\n"
+        + "|" + "---|" * (cantidad_clases + 1)
+        + "\n"
+        + "\n".join(
+            f"| {i} | " + " | ".join(map(str, fila)) + " |"
+            for i, fila in enumerate(matriz)
+        )
+    )
+
+    readme_texto = f"""# Modelo de clasificación de menciones ({data.modelo})
+
+- Dataset: **{data.dataset}**
+- Fecha: **{fecha}**
+- Cantidad de clases: **{cantidad_clases}**
+
+## Configuración y métricas
+
+- Modo: **{data.modo}**
+- Total de muestras: **{total_muestras}**
+- Muestras de entrenamiento: **{muestras_train}**
+- Muestras de evaluación: **{muestras_test}**
+- Accuracy: **{acc:.4f}**
+- F1-score weighted: **{f1:.4f}**
+- Precision weighted: **{prec:.4f}**
+- Recall weighted: **{rec:.4f}**
+
+## Mapeo de clases
+
+{mapping_lines}
+
+## Matriz de confusión
+
+Las filas son las clases reales y las columnas las clases predichas.
+
+{matriz_tabla}
+
+## Uso en Python
+
+```python
+import torch
+from sentence_transformers import SentenceTransformer
+
+checkpoint = torch.load("modelo.pt", weights_only=False)
+clf = checkpoint["clasificador"]
+encoder = SentenceTransformer("{EMBEDDING_MODEL_NAME}")
+
+textos = ["ejemplo de texto a clasificar"]
+embeddings = encoder.encode(textos, normalize_embeddings=True)
+prediccion_id = clf.predict(embeddings)
+
+for texto, clase_id in zip(textos, prediccion_id):
+    print(texto, "->", checkpoint["clases_nombres"][int(clase_id)])
+
+# Matriz guardada en el checkpoint:
+print(checkpoint["matriz_confusion"])
+```
+
+## Dependencias
+
+```bash
+pip install torch scikit-learn sentence-transformers
+```
+"""
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("modelo.pt", checkpoint_buffer.read())
+        zf.writestr("README.md", readme_texto)
+    zip_buffer.seek(0)
+
+    return (
+        tp, fp, tn, fn,
+        acc, f1, prec, rec,
+        total_muestras, muestras_train, muestras_test,
+        zip_buffer, matriz,
+    )
+
+
+class TextDataset(torch.utils.data.Dataset):
+
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        item = {key: val[idx] for key, val in self.encodings.items()}
+        item["labels"] = int(self.labels[idx])
+        return item
+
+    def __len__(self):
+        return len(self.labels)
+
+
+def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
+    model_name = "dccuchile/bert-base-spanish-wwm-uncased"
+    cantidad_clases = len(clases_nombres)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name,
+        num_labels=cantidad_clases,
+        id2label={int(v): k for k, v in label_mapping.items()},
+        label2id={k: int(v) for k, v in label_mapping.items()},
+    )
+    model.to(DEVICE)
+
+    test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
+
+    x_train, x_test, y_train, y_test = train_test_split(
+        textos,
+        y_labels,
+        test_size=test_size,
+        stratify=y_labels,
+        random_state=42,
+    )
+
+    train_encodings = tokenizer(x_train, truncation=True, max_length=128)
+    test_encodings = tokenizer(x_test, truncation=True, max_length=128)
+
+    train_dataset = TextDataset(train_encodings, y_train)
+    test_dataset = TextDataset(test_encodings, y_test)
+    collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
+
+    temp_dir = tempfile.mkdtemp()
+
+    try:
+        args_deseados = {
+            "output_dir": temp_dir,
+            "num_train_epochs": 2,
+            "per_device_train_batch_size": 16 if DEVICE == "cuda" else 4,
+            "per_device_eval_batch_size": 32 if DEVICE == "cuda" else 8,
+            "eval_strategy": "no",
+            "evaluation_strategy": "no",
+            "save_strategy": "no",
+            "use_cpu": DEVICE == "cpu",
+            "fp16": DEVICE == "cuda",
+            "group_by_length": True,
+            "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
+            "dataloader_pin_memory": DEVICE == "cuda",
+            "report_to": "none",
+        }
+
+        soportados = set(inspect.signature(TrainingArguments.__init__).parameters)
+        args_filtrados = {k: v for k, v in args_deseados.items() if k in soportados}
+
+        if "eval_strategy" in args_filtrados and "evaluation_strategy" in args_filtrados:
+            args_filtrados.pop("evaluation_strategy")
+
+        training_args = TrainingArguments(**args_filtrados)
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=test_dataset,
+            data_collator=collator,
+        )
+
+        trainer.train()
+
+        prediction = trainer.predict(test_dataset)
+        y_pred = np.asarray(prediction.predictions).argmax(axis=-1)
+        y_eval = np.asarray(y_test)
+
+        (
+            tp, fp, tn, fn,
+            acc, f1, prec, rec,
+            matriz,
+        ) = calcular_metricas(y_eval, y_pred, cantidad_clases)
+
+        model_dir = os.path.join(temp_dir, "modelo_bert")
+        trainer.save_model(model_dir)
+        tokenizer.save_pretrained(model_dir)
+
+        fecha = datetime.now(timezone.utc).isoformat()
+        mapping_lines = "\n".join(
+            f"- `{clase}` → `{idx}`"
+            for clase, idx in label_mapping.items()
+        )
+        matriz_tabla = (
+            "| Real / Predicha | "
+            + " | ".join(str(i) for i in range(cantidad_clases))
+            + " |\n"
+            + "|" + "---|" * (cantidad_clases + 1)
+            + "\n"
+            + "\n".join(
+                f"| {i} | " + " | ".join(map(str, fila)) + " |"
+                for i, fila in enumerate(matriz)
+            )
+        )
+
+        readme_texto = f"""# Modelo BERT (Fine-Tuning)
+
+- Dataset: **{data.dataset}**
+- Arquitectura base: **{model_name}**
+- Fecha: **{fecha}**
+- Cantidad de clases: **{cantidad_clases}**
+
+## Configuración y métricas
+
+- Muestras de entrenamiento: **{len(y_train)}**
+- Muestras de evaluación: **{len(y_test)}**
+- Accuracy: **{acc:.4f}**
+- F1-score weighted: **{f1:.4f}**
+- Precision weighted: **{prec:.4f}**
+- Recall weighted: **{rec:.4f}**
+
+## Mapeo de clases
+
+{mapping_lines}
+
+## Matriz de confusión
+
+{matriz_tabla}
+
+## Uso en Python
+
+```python
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+
+ruta_modelo = "./modelo_bert"
+tokenizer = AutoTokenizer.from_pretrained(ruta_modelo)
+model = AutoModelForSequenceClassification.from_pretrained(ruta_modelo)
+
+textos = ["ejemplo de texto a clasificar"]
+inputs = tokenizer(
+    textos,
+    return_tensors="pt",
+    padding=True,
+    truncation=True,
+    max_length=128,
+)
+
+with torch.no_grad():
+    logits = model(**inputs).logits
+    predicciones = logits.argmax(dim=-1)
+
+for texto, clase_id in zip(textos, predicciones):
+    clase_id = int(clase_id)
+    print(texto, "->", model.config.id2label[clase_id])
+```
+
+## Dependencias
+
+```bash
+pip install torch transformers accelerate
+```
+"""
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(model_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, model_dir)
+                    zf.write(file_path, f"modelo_bert/{arcname}")
+            zf.writestr("README.md", readme_texto)
+        zip_buffer.seek(0)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        del model
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    return (
+        tp, fp, tn, fn,
+        acc, f1, prec, rec,
+        len(y_labels), len(y_train), len(y_test),
+        zip_buffer, matriz,
+    )
