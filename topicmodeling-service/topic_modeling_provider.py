@@ -193,7 +193,7 @@ class TopicModelingProvider:
         # 7. Reducir cantidad de tópicos SOLO si supera max_topics
         # ------------------------------------------------------------------
 
-        topics = self._reduce_topics_if_needed(
+        topics, reduction, model = self._reduce_topics_if_needed(
             model=model,
             documents=documents,
             topics=topics,
@@ -235,6 +235,7 @@ class TopicModelingProvider:
                 (outlier_count / n_docs) * 100,
                 2,
             ),
+            "reduction": reduction,
             "topics": topic_results,
         }
 
@@ -387,6 +388,10 @@ class TopicModelingProvider:
     # Reducción de tópicos
     # -------------------------------------------------------------------------
 
+    # Escalera de reducción: intentos como máximo, paso entre intentos.
+    REDUCTION_MAX_ATTEMPTS = 4
+    REDUCTION_STEP = 5
+
     def _reduce_topics_if_needed(
         self,
         *,
@@ -394,7 +399,16 @@ class TopicModelingProvider:
         documents: list[str],
         topics: np.ndarray,
         max_topics: int,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, dict[str, int] | None, BERTopic]:
+        """Reduce con escalera ascendente. Nunca lanza: ante fallo total
+        devuelve los tópicos originales con el aviso correspondiente.
+
+        Retorna (topics, reduction, active_model) donde reduction es None
+        si se cumplió lo pedido o {"requested":..., "achieved":...}.
+        """
+
+        import copy
+        import gc
 
         unique_topics = np.unique(topics)
 
@@ -403,29 +417,81 @@ class TopicModelingProvider:
         )
 
         if current_topic_count <= max_topics:
-            return topics
+            return topics, None, model
 
+        candidates = [
+            max_topics + i * self.REDUCTION_STEP
+            for i in range(self.REDUCTION_MAX_ATTEMPTS)
+        ]
+        candidates = [c for c in candidates if c < current_topic_count]
+
+        if not candidates:
+            return (
+                topics,
+                {"requested": max_topics, "achieved": current_topic_count},
+                model,
+            )
+
+        # Backup pristine ANTES del primer intento: reduce_topics muta el
+        # modelo y un fallo podría dejarlo inconsistente para reintentar.
         try:
-            model.reduce_topics(
-                documents,
-                nr_topics=max_topics,
-            )
+            backup = copy.deepcopy(model)
+        except Exception as exc:
+            print(f"[TopicModeling] Backup del modelo falló: {exc}. "
+                  f"Se intenta reducción directa única a {max_topics}.")
+            backup = None
 
-            reduced_topics = np.asarray(
-                model.topics_,
-                dtype=np.int32,
-            )
+        for attempt, nr_topics in enumerate(candidates):
+            if attempt == 0:
+                target = model
+            elif backup is None:
+                break
+            else:
+                target = copy.deepcopy(backup)
 
-            return reduced_topics
+            try:
+                target.reduce_topics(
+                    documents,
+                    nr_topics=nr_topics,
+                )
 
-        except Exception as e:
-            print(f"[ERROR] No fue posible reducir los tópicos de "
-                f"{current_topic_count} a {str(max_topics)}. Se mantiene la cantidad original de tópicos.")
-            raise RuntimeError(
-                f"No fue posible reducir los tópicos de "
-                f"{current_topic_count} a {str(max_topics)}."
-                f" Error: {str(e)}"
-            )
+                reduced_topics = np.asarray(
+                    target.topics_,
+                    dtype=np.int32,
+                )
+
+                achieved = int(
+                    np.count_nonzero(np.unique(reduced_topics) != -1)
+                )
+
+                reduction = (
+                    None
+                    if nr_topics == max_topics
+                    else {"requested": max_topics, "achieved": achieved}
+                )
+
+                if target is not model:
+                    del backup
+                    gc.collect()
+
+                return reduced_topics, reduction, target
+
+            except Exception as exc:
+                print(f"[TopicModeling] Reducción a {nr_topics} falló "
+                      f"(intento {attempt + 1}/{len(candidates)}): {exc}")
+                if target is not model:
+                    del target
+                gc.collect()
+                continue
+
+        gc.collect()
+        print(f"[TopicModeling] No se pudo reducir de "
+              f"{current_topic_count} tópicos. Se devuelven los originales.")
+        return (
+            topics,
+            {"requested": max_topics, "achieved": current_topic_count},
+            model,
+        )
 
     # -------------------------------------------------------------------------
     # Índices por tópico
