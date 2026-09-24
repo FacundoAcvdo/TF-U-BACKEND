@@ -73,12 +73,42 @@ def get_supabase_client(user_jwt: str):
     client.postgrest.auth(user_jwt)
     return client
 
-def deactivate_active_chats(supabase, user_id: str):
+def get_dataset_by_name(supabase, user_id: str, dataset_name: str) -> Optional[Dict[str, Any]]:
     try:
-        resp = supabase.table("chats").update({"activo": False}).eq("user_id", user_id).eq("activo", True).execute()
+        # Intenta traer tipo si la columna ya existe
+        resp = supabase.table("datasets").select("dataset_id,dataset_name,tipo").eq("user_id", user_id).eq("dataset_name", dataset_name).limit(1).execute()
+        if not resp.data:
+            return None
+        return resp.data[0]
+    except Exception as e:
+        # Fallback si columna tipo aún no existe
+        try:
+            resp = supabase.table("datasets").select("dataset_id,dataset_name").eq("user_id", user_id).eq("dataset_name", dataset_name).limit(1).execute()
+            if not resp.data:
+                return None
+            row = resp.data[0]
+            row["tipo"] = None
+            return row
+        except Exception as e2:
+            print(f"[supabase_service] ERROR get_dataset_by_name: {e2}")
+            raise HTTPException(status_code=500, detail=f"Error buscando dataset '{dataset_name}': {str(e2)}")
+
+def deactivate_active_chats(supabase, user_id: str, dataset_id: Optional[str] = None):
+    try:
+        if dataset_id is None:
+            resp = supabase.table("chats").update({"activo": False}).eq("user_id", user_id).eq("activo", True).is_("dataset_id", "null").execute()
+        else:
+            try:
+                resp = supabase.table("chats").update({"activo": False}).eq("user_id", user_id).eq("activo", True).not_.is_("dataset_id", "null").execute()
+            except Exception:
+                active = supabase.table("chats").select("chat_id,dataset_id").eq("user_id", user_id).eq("activo", True).execute()
+                ids = [r["chat_id"] for r in (active.data or []) if r.get("dataset_id") is not None]
+                if not ids:
+                    return 0
+                resp = supabase.table("chats").update({"activo": False}).in_("chat_id", ids).execute()
         count = len(resp.data) if resp.data else 0
         if count:
-            print(f"[supabase_service] Desactivados {count} chats previos de user {user_id}")
+            print(f"[supabase_service] Desactivados {count} chats previos de user {user_id} grupo={'rag_docs' if dataset_id is None else 'dataset'}")
         return count
     except Exception as e:
         if "activo" in str(e).lower() or "column" in str(e).lower():
@@ -87,32 +117,45 @@ def deactivate_active_chats(supabase, user_id: str):
         print(f"[supabase_service] ERROR deactivate_active_chats: {e}")
         raise HTTPException(status_code=500, detail=f"Error desactivando chats previos: {str(e)}")
 
-def create_chat_record(supabase, chat_id: str, user_id: str):
-    payload = {"chat_id": chat_id, "user_id": user_id, "activo": True}
+def create_chat_record(supabase, chat_id: str, user_id: str, dataset_id: Optional[str] = None):
+    payload = {"chat_id": chat_id, "user_id": user_id, "activo": True, "dataset_id": dataset_id}
     try:
-        deactivate_active_chats(supabase, user_id)
+        deactivate_active_chats(supabase, user_id, dataset_id)
         resp = supabase.table("chats").insert(payload).execute()
-        print(f"[supabase_service] Chat {chat_id} creado ACTIVO para user {user_id}")
+        print(f"[supabase_service] Chat {chat_id} creado ACTIVO para user {user_id} dataset_id={dataset_id}")
         return resp.data[0] if resp.data else None
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e).lower()
-        # Solo reintenta si es violación de unicidad por chat activo
         if "idx_chats_one_active" in msg or "duplicate" in msg:
             print(f"[supabase_service] Conflicto chat activo, reintentando deactivate: {e}")
             try:
-                deactivate_active_chats(supabase, user_id)
+                deactivate_active_chats(supabase, user_id, dataset_id)
                 resp = supabase.table("chats").insert(payload).execute()
                 return resp.data[0] if resp.data else None
             except Exception as e2:
                 raise HTTPException(status_code=500, detail=f"Error creando chat activo: {str(e2)}")
+        if "dataset_id" in msg:
+            print(f"[supabase_service] WARNING columna dataset_id no existe, reintentando sin ella: {e}")
+            fallback = {"chat_id": chat_id, "user_id": user_id, "activo": True}
+            try:
+                deactivate_active_chats(supabase, user_id, None)
+                resp = supabase.table("chats").insert(fallback).execute()
+                return resp.data[0] if resp.data else None
+            except Exception as e3:
+                raise HTTPException(status_code=500, detail=f"Error creando chat fallback: {str(e3)}")
         print(f"[supabase_service] ERROR insert chats: {e}")
         raise HTTPException(status_code=500, detail=f"Error creando chat en Supabase: {str(e)}")
 
-def get_active_chat(supabase, user_id: str) -> Optional[Dict[str, Any]]:
+def get_active_chat(supabase, user_id: str, dataset_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     try:
-        resp = supabase.table("chats").select("*").eq("user_id", user_id).eq("activo", True).limit(1).execute()
+        q = supabase.table("chats").select("*").eq("user_id", user_id).eq("activo", True)
+        if dataset_id is None:
+            q = q.is_("dataset_id", "null")
+        else:
+            q = q.eq("dataset_id", dataset_id)
+        resp = q.limit(1).execute()
         return resp.data[0] if resp.data else None
     except Exception as e:
         print(f"[supabase_service] ERROR get_active_chat: {e}")
@@ -148,17 +191,16 @@ def get_chat_messages(supabase, chat_id: str, user_id: str) -> List[Dict[str, An
         print(f"[supabase_service] ERROR get_chat_messages: {e}")
         raise HTTPException(status_code=500, detail=f"Error obteniendo mensajes: {str(e)}")
 
-def get_active_chat_with_messages(supabase, user_id: str) -> Optional[Dict[str, Any]]:
-    chat = get_active_chat(supabase, user_id)
+def get_active_chat_with_messages(supabase, user_id: str, dataset_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    chat = get_active_chat(supabase, user_id, dataset_id)
     if not chat:
         return None
     chat_full = _get_chat_record(supabase, chat["chat_id"], user_id)
     if not chat_full:
         return None
     mensajes_raw = get_chat_messages(supabase, chat["chat_id"], user_id)
-    # get_chat_messages ya devuelve solo autor/mensaje/created_at
     mensajes = [_to_public_mensaje(m) for m in mensajes_raw]
-    return {"chat_id": chat_full.get("chat_id"), "fecha_creacion": chat_full.get("fecha_creacion"), "mensajes": mensajes}
+    return {"chat_id": chat_full.get("chat_id"), "fecha_creacion": chat_full.get("fecha_creacion"), "dataset_id": chat_full.get("dataset_id"), "mensajes": mensajes}
 
 def get_user_chats_with_stats(supabase, user_id: str) -> List[Dict[str, Any]]:
     chats = _get_user_chats(supabase, user_id)
@@ -176,5 +218,5 @@ def get_user_chats_with_stats(supabase, user_id: str) -> List[Dict[str, Any]]:
             print(f"[supabase_service] WARNING stats chat {cid}: {e}")
             cantidad = 0
             ultimo = None
-        result.append({"chat_id": cid, "fecha_creacion": c.get("fecha_creacion"), "updated_at": c.get("updated_at"), "activo": c.get("activo"), "cantidad_mensajes": cantidad, "ultimo_mensaje": ultimo})
+        result.append({"chat_id": cid, "fecha_creacion": c.get("fecha_creacion"), "updated_at": c.get("updated_at"), "activo": c.get("activo"), "dataset_id": c.get("dataset_id"), "cantidad_mensajes": cantidad, "ultimo_mensaje": ultimo})
     return result

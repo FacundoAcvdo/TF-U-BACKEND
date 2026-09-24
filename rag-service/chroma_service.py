@@ -27,22 +27,23 @@ def get_chroma_client():
         raise
 
 
-def get_or_create_collection(client=None):
+def get_or_create_collection(client=None, name: str | None = None):
     if client is None:
         client = get_chroma_client()
-    name = COLLECTION_NAME
+    # Compatibilidad: si no se pasa name usa COLLECTION_NAME (rag_docs)
+    collection_name = name or COLLECTION_NAME
     try:
-        collection = client.get_collection(name=name)
-        print(f"[chroma_service] Colección existente '{name}' recuperada. Count={collection.count()}")
+        collection = client.get_collection(name=collection_name)
+        print(f"[chroma_service] Colección existente '{collection_name}' recuperada. Count={collection.count()}")
         return collection
     except Exception:
-        print(f"[chroma_service] Creando nueva colección '{name}' con space=cosine")
+        print(f"[chroma_service] Creando nueva colección '{collection_name}' con space=cosine")
         try:
             collection = client.create_collection(
-                name=name,
+                name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
         except Exception as e:
             print(f"[chroma_service] Error creando colección: {e}")
-            collection = client.get_collection(name=name)
+            collection = client.get_collection(name=collection_name)
         return collection

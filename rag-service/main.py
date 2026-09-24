@@ -1,6 +1,6 @@
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Header, HTTPException, Body, Depends
+from fastapi import FastAPI, Header, HTTPException, Body, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -14,6 +14,7 @@ from supabase_service import (
     get_chat_messages,
     get_active_chat_with_messages,
     get_user_chats_with_stats,
+    get_dataset_by_name,
 )
 
 
@@ -49,21 +50,36 @@ def get_supabase(x_user_token: str = Header(..., alias="X-User-Token")):
 
 class ChatMessageRequest(BaseModel):
     mensaje: str
+    dataset_name: str | None = None
+
+
+class CreateChatRequest(BaseModel):
+    dataset_name: str | None = None
 
 @app.post("/chat")
 async def create_chat(
+    data: CreateChatRequest = Body(default=CreateChatRequest()),
     x_user_id: str = Header(..., alias="X-User-ID"),
     supabase=Depends(get_supabase),
 ):
     try:
+        dataset_name = data.dataset_name.strip() if data.dataset_name and data.dataset_name.strip() else None
+        dataset_id = None
+        if dataset_name:
+            row = get_dataset_by_name(supabase, x_user_id, dataset_name)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' no encontrado para el usuario")
+            dataset_id = row.get("dataset_id")
         chat_id = str(uuid.uuid4())
-        chat = create_chat_record(supabase, chat_id, x_user_id)
+        chat = create_chat_record(supabase, chat_id, x_user_id, dataset_id=dataset_id)
         return {
             "chat_id": chat_id,
             "fecha_creacion": chat.get("fecha_creacion") if chat else None,
+            "dataset_id": dataset_id,
+            "dataset_name": dataset_name,
             "activo": True,
             "mensajes": [],
-            "message": "Chat activo creado (anterior desactivado si existía)"
+            "message": "Chat activo creado (anterior desactivado si existía en su grupo)"
         }
     except HTTPException:
         raise
@@ -82,31 +98,61 @@ async def send_message(
     if not pregunta:
         raise HTTPException(status_code=422, detail="mensaje no puede estar vacío")
 
-    # 1. Inferir chat activo
-    chat = get_active_chat(supabase, x_user_id)
+    dataset_name = data.dataset_name.strip() if data.dataset_name and data.dataset_name.strip() else None
+
+    # 1. Resolver dataset_id y collection con única consulta a datasets (tipo -> collection)
+    dataset_id = None
+    collection = "rag_docs"
+    rag_filter = None
+    if dataset_name:
+        try:
+            row = get_dataset_by_name(supabase, x_user_id, dataset_name)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' no encontrado para el usuario")
+            
+            dataset_id = row.get("dataset_id")
+            tipo = (row.get("tipo") or "").strip().lower()
+            if tipo in ("chunked_chat", "chunked_chats", "chunked"):
+                collection = "chunked_chats"
+            else:
+                collection = "documents"
+            rag_filter = {
+                "$and": [
+                    {"user_id": x_user_id},
+                    {"dataset_id": dataset_id }
+                ]
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error resolviendo dataset: {str(e)}")
+
+    # 2. Inferir chat activo del grupo correspondiente (rag_docs vs dataset)
+    chat = get_active_chat(supabase, x_user_id, dataset_id=dataset_id)
     if not chat:
-        raise HTTPException(status_code=404, detail="No hay chat activo. Crea uno con POST /chat primero.")
+        grupo = f"dataset '{dataset_name}'" if dataset_name else "rag_docs"
+        raise HTTPException(status_code=404, detail=f"No hay chat activo para {grupo}. Crea uno con POST /chat primero.")
     chat_id = chat["chat_id"]
 
-    # 2. Historial previo para contexto RAG
+    # 3. Historial previo para contexto RAG
     mensajes_previos = get_chat_messages(supabase, chat_id, x_user_id)
     historial_previo = [
         {"autor": m.get("autor"), "mensaje": m.get("mensaje")}
         for m in mensajes_previos
     ]
 
-    # Insertar mensaje usuario y guardar copia pública para eventual uso
+    # Insertar mensaje usuario
     msg_usuario = create_message(supabase, chat_id, x_user_id, "usuario", pregunta)
 
     historial_para_rag = historial_previo + [{"autor": "usuario", "mensaje": pregunta}]
 
-    # 3. RAG - fix bug previo: variable 're' no definida
-    if not rag_service.is_ready():
-        print("[main] RAG Not Ready")
-        raise HTTPException(status_code=503, detail="RAG service not ready. Please try again later.")
+    # 4. RAG por colección
+    if not rag_service.is_store_ready(collection):
+        print(f"[main] RAG Not Ready para colección {collection}")
+        raise HTTPException(status_code=503, detail=f"RAG service not ready para colección '{collection}'. Please try again later.")
 
     try:
-        respuesta, docs_relevantes = rag_service.query(pregunta, chat_history=historial_para_rag)
+        respuesta, docs_relevantes = rag_service.query(pregunta, chat_history=historial_para_rag, collection=collection, filter=rag_filter)
     except RuntimeError as re:
         print(f"[main] RAG RuntimeError: {re}")
         raise HTTPException(status_code=503, detail=str(re))
@@ -129,13 +175,21 @@ async def send_message(
 
 @app.get("/chat")
 async def get_chat(
+    dataset_name: str | None = Query(default=None),
     x_user_id: str = Header(..., alias="X-User-ID"),
     supabase=Depends(get_supabase),
 ):
     try:
-        data = get_active_chat_with_messages(supabase, x_user_id)
+        dataset_id = None
+        if dataset_name and dataset_name.strip():
+            row = get_dataset_by_name(supabase, x_user_id, dataset_name.strip())
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' no encontrado para el usuario")
+            dataset_id = row.get("dataset_id")
+        data = get_active_chat_with_messages(supabase, x_user_id, dataset_id)
         if data is None:
-            raise HTTPException(status_code=404, detail="No hay chat activo para este usuario")
+            grupo = f"dataset '{dataset_name}'" if dataset_name else "rag_docs"
+            raise HTTPException(status_code=404, detail=f"No hay chat activo para {grupo}")
         return data
     except HTTPException:
         raise

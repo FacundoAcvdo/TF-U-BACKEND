@@ -2,19 +2,18 @@ import os
 import re
 import glob
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnableLambda
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from chroma_service import get_chroma_client, get_or_create_collection, COLLECTION_NAME
+from chroma_service import get_chroma_client, get_or_create_collection
+from prompts import PROMPTS
 
 # ----------------- Config -----------------
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
@@ -29,40 +28,18 @@ DOCS_PATH = os.environ.get("DOCS_PATH", "/app/data/rag_docs")
 
 RAG_INIT_ON_STARTUP = os.environ.get("RAG_INIT_ON_STARTUP", "false").lower() in ("true", "1", "yes", "on")
 
-# ---------- Prompt técnico para investigadores (conciso) ----------
-SYSTEM_PROMPT_TEMPLATE = """Eres un asistente técnico para INVESTIGADORES en salud mental (depresión, ansiedad, factores de riesgo y prevención del suicidio).
+# Nombres de colecciones
+RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs")
+DOCUMENTS_COLLECTION = os.environ.get("CHROMA_COLLECTION_DOCUMENTS", "documents")
+CHUNKED_CHATS_COLLECTION = os.environ.get("CHROMA_COLLECTION_CHUNKED", "chunked_chats")
 
-Objetivo: responder de forma CONCISA, directa y sin rodeos, pero sin omitir detalles críticos.
+ALL_COLLECTIONS = {
+    "rag_docs": RAG_DOCS_COLLECTION,
+    "documents": DOCUMENTS_COLLECTION,
+    "chunked_chats": CHUNKED_CHATS_COLLECTION,
+}
 
-Reglas:
-- Responde EXACTAMENTE lo preguntado. No añadas introducciones largas, historia general, ni conclusiones genéricas si no se piden.
-- Usa ÚNICAMENTE el contexto proporcionado. Si falta info, di: "No tengo información suficiente en los documentos indexados sobre ese punto" y sugiere qué documento/sección podría contenerla.
-- Sé conciso: apunta a 120-220 palabras, párrafos cortos o bullets. Solo expande si la pregunta pide profundidad.
-- Incluye solo detalles importantes: definición precisa, criterios clave (DSM-5/CIE-11), clasificaciones/subtipos y diferencias con conceptos afines cuando aporten valor. Omite ejemplos y matices secundarios salvo que sean esenciales.
-- Formato OBLIGATORIO en Markdown GFM (el frontend lo renderiza bonito):
-  * Usa **negrita** para términos clave.
-  * Usa listas con guión `- ` para enumerar ítems (ej. Puntos de Función desglosados).
-  * Para datos tabulares (ej. PF por módulo) usa SIEMPRE tabla GFM con cabecera y separador: `| Función | Tipo | Complejidad | PF |` + `|---|---|---|---|` + filas. Nunca escribas tablas como texto con `|` sin cabecera.
-  * Deja una línea en blanco entre párrafos, listas y tablas.
-- Cita general sin inventar (ej. "según documento X, sección Y").
-- No diagnostiques, no etiquetes personas, no prescribas. Si la pregunta insinúa un caso, aclara que es información general de investigación.
-- Tono técnico, objetivo, en español (salvo que pregunten en otro idioma). Nada de tono empático-terapéutico.
-- No expliques tu razonamiento paso a paso; ve al resultado.
-- No añadas recursos de crisis salvo pedido explícito.
-- Cierra solo si corresponde con: "Nota: Información con fines educativos y de investigación, no sustituye evaluación profesional."
-
-Contexto recuperado:
-{context}
-
-Historial (si existe):
-{chat_history}
-
-Pregunta:
-{question}
-
-Respuesta concisa:"""
-
-# ---------- helpers top-level (evitan redefinir en cada _build_chains) ----------
+# ---------- helpers top-level ----------
 def _format_docs(docs: List[Document]) -> str:
     return "\n\n".join(doc.page_content for doc in docs)
 
@@ -81,10 +58,10 @@ def _format_history(chat_history: List[dict]) -> str:
 class RAGService:
     def __init__(self):
         self.embeddings = None
-        self.vectorstore = None
-        self.retriever = None
         self.llm = None
-        self.rag_chain = None
+        self.chroma_client = None
+        self.stores: Dict[str, Chroma] = {}
+        self.prompts: Dict[str, ChatPromptTemplate] = {}
         self._initialized = False
 
     # ---------- Embeddings ----------
@@ -106,6 +83,22 @@ class RAGService:
         )
         print("[rag_service] LLM inicializado")
 
+    # ---------- Chroma stores ----------
+    def _init_stores(self):
+        self.chroma_client = get_chroma_client()
+        for key, coll_name in ALL_COLLECTIONS.items():
+            get_or_create_collection(self.chroma_client, name=coll_name)
+            self.stores[key] = Chroma(
+                client=self.chroma_client,
+                collection_name=coll_name,
+                embedding_function=self.embeddings,
+            )
+
+            template = PROMPTS.get(key)
+            self.prompts[key] = ChatPromptTemplate.from_template(template)
+            print(f"[rag_service] Store '{key}' -> colección '{coll_name}' inicializado")
+
+    # ---------- rag_docs: carga desde disco ----------
     def _discover_documents(self) -> List[str]:
         if not DOCS_PATH:
             print("[rag_service] DOCS_PATH no configurado -> skip")
@@ -125,7 +118,7 @@ class RAGService:
     def _load_documents(self) -> List[Document]:
         files = self._discover_documents()
         if not files:
-            print(f"[rag_service] No se encontraron documentos en {DOCS_PATH}. Colección quedará vacía hasta montar el volumen.")
+            print(f"[rag_service] No se encontraron documentos en {DOCS_PATH}. Colección rag_docs quedará sin reindexar.")
             return []
         docs: List[Document] = []
         for fpath in files:
@@ -160,70 +153,80 @@ class RAGService:
         print(f"[rag_service] Chunks generados: {len(splits)}")
         return splits
 
-    def _init_vectorstore(self, splits: List[Document] = None):
-        chroma_client = get_chroma_client()
-        get_or_create_collection(chroma_client)
-
-        self.vectorstore = Chroma(
-            client=chroma_client,
-            collection_name=COLLECTION_NAME,
-            embedding_function=self.embeddings,
-        )
-        if splits:
-            print(f"[rag_service] Inicializando vectorstore con {len(splits)} documentos")
-            batch_size = 100
-            for i in range(0, len(splits), batch_size):
-                batch = splits[i:i+batch_size]
-                self.vectorstore.add_documents(documents=batch)
-        else:
-            print("[rag_service] Inicializando vectorstore sin documentos (colección vacía)")
-
-        print("[rag_service] Vectorstore inicializado")
-        self.retriever = self.vectorstore.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": TOP_K}
-        )
-
-    def _build_chains(self):
-        if not self.llm or not self.retriever:
+    def _reindex_rag_docs(self):
+        """Reindexa rag_docs si RAG_INIT_ON_STARTUP=true: agrega documentos nuevos encontrados en DOCS_PATH."""
+        if not RAG_INIT_ON_STARTUP:
+            print("[rag_service] RAG_INIT_ON_STARTUP=false -> skip reindex rag_docs")
             return
-        prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT_TEMPLATE)
-        self.rag_chain = (
-            {
-                "context": RunnableLambda(lambda x: _format_docs(self.retriever.invoke(x["question"]))),
-                "question": RunnableLambda(lambda x: x["question"]),
-                "chat_history": RunnableLambda(lambda x: _format_history(x.get("chat_history", []))),
-            }
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
+        docs = self._load_documents()
+        splits = self._split_documents(docs)
+        if not splits:
+            print("[rag_service] No hay splits para reindexar rag_docs")
+            return
+        store = self.stores.get("rag_docs")
+        if store is None:
+            print("[rag_service] Store rag_docs no inicializado, skip reindex")
+            return
+        print(f"[rag_service] Reindexando rag_docs con {len(splits)} chunks (append, sin borrar existentes)")
+        batch_size = 100
+        for i in range(0, len(splits), batch_size):
+            batch = splits[i:i+batch_size]
+            store.add_documents(documents=batch)
+        print("[rag_service] Reindex rag_docs completado")
 
     def initialize(self):
         if self._initialized:
             return
         self._init_embeddings()
         self._init_llm()
-        if RAG_INIT_ON_STARTUP:
-            docs = self._load_documents()
-            splits = self._split_documents(docs)
-            self._init_vectorstore(splits)
-        else:
-            self._init_vectorstore(splits=None)
-        self._build_chains()
+        self._init_stores()
+        # Solo rag_docs se reindexa condicionalmente; documents/chunked_chats consumen embeddings ya en Chroma
+        try:
+            self._reindex_rag_docs()
+        except Exception as e:
+            print(f"[rag_service] Error en reindex rag_docs: {e}")
         self._initialized = True
+        print("[rag_service] Inicialización completa - 3 stores listos")
 
     def is_ready(self) -> bool:
-        return self._initialized and self.retriever is not None and self.llm is not None
+        return self._initialized and self.llm is not None and len(self.stores) == 3
 
-    def query(self, question: str, chat_history: List[dict] = None) -> Tuple[str, List[Document]]:
-        if not self.is_ready():
-            raise RuntimeError("RAG no inicializado")
-        relevant_docs = self.retriever.invoke(question)
-        response = self.rag_chain.invoke({
-            "question": question,
-            "chat_history": chat_history or []
-        })
-        return response, relevant_docs
+    def is_store_ready(self, collection: str) -> bool:
+        return self._initialized and collection in self.stores and self.llm is not None
+
+    def get_store(self, collection: str) -> Chroma:
+        if collection not in self.stores:
+            raise ValueError(f"Colección '{collection}' no existe. Disponibles: {list(self.stores.keys())}")
+        return self.stores[collection]
+
+    # ---------- Query genérico por colección ----------
+    def query(
+        self,
+        question: str,
+        chat_history: List[dict] = None,
+        collection: str = "rag_docs",
+        filter: Optional[Dict] = None,
+        k: Optional[int] = None,
+    ) -> Tuple[str, List[Document]]:
+        """Consulta por colección con filtro opcional (para documents/chunked_chats)."""
+        if not self.is_store_ready(collection):
+            raise RuntimeError(f"RAG no inicializado para colección '{collection}'")
+        store = self.get_store(collection)
+        top_k = k or TOP_K
+
+        # Búsqueda con filtro server-side (Chroma where)
+        if filter:
+            relevant_docs = store.similarity_search(question, k=top_k, filter=filter)
+        else:
+            relevant_docs = store.similarity_search(question, k=top_k)
+
+        context = _format_docs(relevant_docs)
+        history_str = _format_history(chat_history or [])
+        prompt = self.prompts[collection]
+        prompt_value = prompt.format(context=context, chat_history=history_str, question=question)
+        response = self.llm.invoke(prompt_value)
+        # ChatGoogleGenerativeAI retorna AIMessage
+        content = response.content if hasattr(response, "content") else str(response)
+        return content, relevant_docs
 
 rag_service = RAGService()
