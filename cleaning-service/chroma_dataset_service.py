@@ -1,57 +1,76 @@
-import json
 from pathlib import Path
 
 import pandas as pd
+
+from chroma_reader import fetch_paginated
 
 _INTERNAL_METADATA_FIELDS = {
     "formato_original",
     "formato_detectado",
 }
 
-class DatasetStorageService:
+# Claves internas que Chroma agrega y que no son parte del documento original.
+_CHROMA_INTERNAL_KEYS = {
+    "dataset_id",
+    "user_id",
+    "source_filename",
+    "_empty",
+    "_v",
+}
 
-    def __init__(
-        self,
-        dataset_storage_path: str,
-    ):
-        self.dataset_storage_path = Path(
-            dataset_storage_path
-        )
+class ChromaDatasetService:
 
-    def get_dataset_path(
-        self,
-        user_id: str,
-        dataset_id: str,
-    ) -> Path:
+    def __init__(self) -> None:
+        pass
 
-        return (
-            self.dataset_storage_path
-            / "users"
-            / user_id
-            / f"{dataset_id}.json"
-        )
-
-    def load_dataset(
+    async def load_dataset(
         self,
         user_id: str,
         dataset_id: str,
     ) -> dict:
+        where = {
+            "$and": [
+                {"user_id": user_id},
+                {"dataset_id": dataset_id},
+            ]
+        }
+        data = await fetch_paginated(where, ["documents", "metadatas"])
 
-        path = self.get_dataset_path(
-            user_id,
-            dataset_id,
-        )
-
-        if not path.exists():
+        ids = data.get("ids") or []
+        if not ids:
             raise FileNotFoundError(
                 "Dataset no encontrado."
             )
 
-        return json.loads(
-            path.read_text(
-                encoding="utf-8"
+        documents_raw = data.get("documents", [])
+        metadatas_raw = data.get("metadatas", [])
+
+        filename = None
+        documents: list[dict] = []
+        for i, texto in enumerate(documents_raw):
+            meta = dict(metadatas_raw[i]) if i < len(metadatas_raw) else {}
+
+            if filename is None and meta.get("source_filename"):
+                filename = str(meta.get("source_filename"))
+
+            clase = meta.pop("clase", None)
+            fecha = meta.pop("fecha", None)
+            for k in _CHROMA_INTERNAL_KEYS:
+                meta.pop(k, None)
+
+            documents.append(
+                {
+                    "texto": texto,
+                    "clase": clase,
+                    "fecha": fecha,
+                    "metadata": meta,
+                }
             )
-        )
+
+        return {
+            "filename": filename or f"{dataset_id}.csv",
+            "documents": documents,
+        }
 
     def export_cleaned_dataset(
         self,

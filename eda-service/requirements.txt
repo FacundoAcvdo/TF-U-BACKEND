@@ -8,3 +8,5 @@ seaborn
 scikit-learn
 supabase
 storage3
+
+chromadb>=0.5.5

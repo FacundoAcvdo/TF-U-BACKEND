@@ -68,13 +68,13 @@ class CleaningService:
 
     def __init__(
         self,
-        dataset_storage_service,
+        dataset_service,
         supabase_service,
         download_service,
     ):
 
-        self.dataset_storage_service = (
-            dataset_storage_service
+        self.dataset_service = (
+            dataset_service
         )
 
         self.download_service = (
@@ -138,8 +138,8 @@ class CleaningService:
             user_token=user_token,
         )
 
-        dataset = (
-            self.dataset_storage_service.load_dataset(
+        dataset = await (
+            self.dataset_service.load_dataset(
                 user_id=user_id,
                 dataset_id=dataset_id,
             )
@@ -365,7 +365,7 @@ class CleaningService:
                 break
 
         original_filename = (
-            self.dataset_storage_service
+            self.dataset_service
             .get_original_filename(
                 dataset
             )
@@ -401,7 +401,7 @@ class CleaningService:
                 for entry in entries
             ]
 
-            self.dataset_storage_service.export_cleaned_dataset(
+            self.dataset_service.export_cleaned_dataset(
                 documents=documents,
                 output_path=output_path,
             )

@@ -4,20 +4,18 @@ from pydantic import BaseModel
 
 import os
 import re
-import json
-from pathlib import Path
 from collections import Counter
 
 from nltk.corpus import stopwords
 
 from supabase import create_client
+from chroma_reader import fetch_paginated
 
 class WordCloudRequest(BaseModel):
     dataset: str
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-BASE_PATH = os.environ.get("BASE_PATH")
 
 STOPWORDS = (
     set(stopwords.words("spanish"))
@@ -145,16 +143,21 @@ def build_wordcloud_data(textos_limpios: list[str], max_words: int = 200):
         "min_count": min_count,
     }
 
-def load_and_process_dataset(x_user_id: str, dataset_id: str):
-    dataset_file = Path("./data/datasets") / "users" / x_user_id / f"{dataset_id}.json"
-    if not dataset_file.exists():
-        raise HTTPException(status_code=404, detail=f"Dataset file not found: {dataset_file}")
-    with open(dataset_file, "r", encoding="utf-8") as f:
-        dataset_json = json.load(f)
-    documents = dataset_json.get("documents", [])
+async def load_and_process_dataset(x_user_id: str, dataset_id: str):
+    # Solo pide documents, paginado.
+    where = {
+        "$and": [
+            {"user_id": x_user_id},
+            {"dataset_id": dataset_id},
+        ]
+    }
+    data = await fetch_paginated(where, ["documents"])
+    documents = data.get("documents", [])
+    if not documents:
+        raise HTTPException(status_code=404, detail="No documents found for dataset in Chroma")
     textos = []
-    for document in documents:
-        texto = document.get("texto", "").strip()
+    for texto_raw in documents:
+        texto = (texto_raw or "").strip()
         if texto:
             textos.append(limpiar_texto(texto))
     texto_completo = " ".join(textos)
@@ -174,7 +177,7 @@ async def createWordCloud(
         response = (
             supabase
             .table("datasets")
-            .select("*")
+            .select("dataset_id")
             .eq("dataset_name", data.dataset)
             .eq("user_id", x_user_id)
             .execute()
@@ -188,7 +191,7 @@ async def createWordCloud(
         if not dataset_id:
             raise HTTPException(status_code=500, detail="Dataset does not have a dataset_id.")
 
-        textos_limpios, docs_processed = load_and_process_dataset(x_user_id, dataset_id)
+        textos_limpios, docs_processed = await load_and_process_dataset(x_user_id, dataset_id)
 
         wc_data = build_wordcloud_data(textos_limpios, max_words=200)
 

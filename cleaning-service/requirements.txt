@@ -11,3 +11,4 @@ emoji
 spacy
 langdetect
 nltk
+chromadb>=0.5.5

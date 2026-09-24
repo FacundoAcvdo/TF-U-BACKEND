@@ -1,18 +1,22 @@
-import json
 import pandas as pd
 
-def parse_dataset_json(ruta: str) -> pd.DataFrame:
-    with open(ruta, "r", encoding="utf-8") as f:
-        json_data = json.load(f)
 
+def build_dataframe_from_chroma(documents: list, metadatas: list) -> pd.DataFrame:
+    """Arma el DataFrame desde documents/metadata de Chroma.
+
+    En Chroma: documents[i] = texto, metadatas[i] = {clase, fecha, ...}.
+    """
     records = []
-    for doc in json_data.get("documents", []):
-        row = {"texto": doc.get("texto"), "clase": doc.get("clase")}
-        records.append(row)
+    for i, texto in enumerate(documents or []):
+        meta = metadatas[i] if i < len(metadatas or []) else {}
+        records.append({
+            "texto": texto,
+            "clase": (meta or {}).get("clase"),
+        })
 
     df = pd.DataFrame(records)
 
-    fechas = [doc.get("fecha") for doc in json_data.get("documents", [])]
+    fechas = [(m or {}).get("fecha") for m in (metadatas or [])]
     if any(f is not None for f in fechas):
         df["fecha"] = fechas
 

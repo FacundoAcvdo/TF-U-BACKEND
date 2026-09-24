@@ -54,15 +54,6 @@ class Document:
 
         return result
 
-    @classmethod
-    def from_dict(cls,data: dict[str, Any],) -> "Document":
-        return cls(
-            texto=str(data["texto"]),
-            clase=data.get("clase"),
-            fecha=data.get("fecha"),
-            metadata=data.get("metadata", {}),
-        )
-
 
 @dataclass
 class DatasetDocument:
@@ -99,28 +90,6 @@ class DatasetDocument:
             ensure_ascii=False,
             default=str,
         ).encode("utf-8")
-
-    @classmethod
-    def from_dict(cls,data: dict[str, Any],) -> "DatasetDocument":
-        documents = [
-            Document.from_dict(item)
-            for item in data.get(
-                "documents",
-                [],
-            )
-        ]
-
-        return cls(
-            dataset_id=data["dataset_id"],
-            user_id=data["user_id"],
-            filename=data["filename"],
-            created_at=data["created_at"],
-            documents=documents,
-            version=data.get(
-                "version",
-                "1.0",
-            ),
-        )
 
 
 @dataclass

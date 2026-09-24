@@ -9,7 +9,8 @@ import pandas as pd
 import numpy as np
 from collections import Counter, defaultdict
 
-from utils import parse_dataset_json
+from utils import build_dataframe_from_chroma
+from chroma_reader import fetch_paginated
 from emotion_service import EMOTIONS, enrich_dataframe_with_emotions, get_emotion_pipeline
 from stats_service import get_corpus_emotion_stats, get_class_emotion_stats
 from supabase_service import (
@@ -55,12 +56,6 @@ try:
 except Exception as e:
     print(f"[emotions-service] NLTK stopwords no disponible ({e}) -> fallback hardcodeado {len(_FALLBACK_ES|_FALLBACK_EN)}", flush=True)
     STOPWORDS = _FALLBACK_ES | _FALLBACK_EN
-
-###############
-
-DATASET_STORAGE_PATH = os.environ.get("DATASET_STORAGE_PATH", "./data/datasets")
-
-###############
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -322,10 +317,17 @@ async def analyze_emotions(
         supabase = get_supabase_client(x_user_token)
         dataset_info = get_dataset_info(supabase, data.dataset, x_user_id)
         dataset_id = dataset_info["dataset_id"]
-        dataset_path = os.path.join(DATASET_STORAGE_PATH, "users", x_user_id, f"{dataset_id}.json")
-        if not os.path.exists(dataset_path):
-            raise HTTPException(status_code=404, detail=f"Dataset file not found at {dataset_path}")
-        df = parse_dataset_json(dataset_path)
+        # Pide solo documents+metadatas, paginado.
+        chroma_data = await fetch_paginated(
+            {"$and": [{"user_id": x_user_id}, {"dataset_id": dataset_id}]},
+            ["documents", "metadatas"],
+        )
+        if not chroma_data.get("ids"):
+            raise HTTPException(status_code=404, detail="No documents found for dataset in Chroma")
+        df = build_dataframe_from_chroma(
+            chroma_data.get("documents", []),
+            chroma_data.get("metadatas", []),
+        )
         if df.empty:
             raise HTTPException(status_code=400, detail="Dataset is empty")
 

@@ -55,9 +55,6 @@ class ClusterRequest(BaseModel):
 
 
 def build_response_data(clusters_df, outliers_df, max_points: int = 8000):
-    # combinar puntos
-    # clusters_df: x,y,cluster (str != "-1")
-    # outliers_df: x,y,cluster == "-1"
     total = len(clusters_df) + len(outliers_df)
 
     # downsample si supera max_points (muestreo uniforme para mantener forma)
@@ -110,12 +107,14 @@ async def visualize_embeddings(
 
         dataset_info = get_dataset_info(supabase, data.dataset, x_user_id)
 
-        embeddings = get_dataset_embeddings(dataset_info.get("dataset_id"), x_user_id)
+        embeddings = await get_dataset_embeddings(dataset_info.get("dataset_id"), x_user_id)
 
         if embeddings is None or len(embeddings) == 0:
             raise HTTPException(status_code=404, detail="No embeddings found for dataset")
 
-        clusters_df, outliers_df = get_cluster_and_outlier_dataframes(embeddings)
+        clusters_df, outliers_df = await asyncio.to_thread(
+            get_cluster_and_outlier_dataframes, embeddings
+        )
 
         result = build_response_data(clusters_df, outliers_df)
 

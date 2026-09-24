@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse
 
 from config import get_settings
 
-from dataset_storage_service import (
-    DatasetStorageService,
+from chroma_dataset_service import (
+    ChromaDatasetService,
 )
 
 from download.download_service import (
@@ -48,11 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-dataset_storage_service = (
-    DatasetStorageService(
-        settings.dataset_storage_path
-    )
-)
+dataset_service = ChromaDatasetService()
 
 download_service = DownloadService(
     storage_path=settings.cleaning_download_path
@@ -61,7 +57,7 @@ download_service = DownloadService(
 supabase_service = SupabaseService()
 
 cleaning_service = CleaningService(
-    dataset_storage_service=dataset_storage_service,
+    dataset_service=dataset_service,
     download_service=download_service,
     supabase_service=supabase_service,
 )

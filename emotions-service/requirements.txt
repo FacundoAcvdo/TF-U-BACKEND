@@ -11,3 +11,5 @@ torch
 accelerate
 sentencepiece
 nltk
+
+chromadb>=0.5.5

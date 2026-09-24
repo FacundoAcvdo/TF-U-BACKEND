@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from fastapi import FastAPI, Header, HTTPException
@@ -67,11 +68,13 @@ async def detectar_menciones(
         }
 
         es_bert = data.modelo == "BERT"
-        clases, documentos, x_vectors = obtener_datos_dataset(
+  
+        clases, documentos, x_vectors = await asyncio.to_thread(
+            obtener_datos_dataset,
             collection,
             filtros,
-            incluir_embeddings=not es_bert,
-            incluir_documentos=es_bert,
+            not es_bert,
+            es_bert,
         )
 
         y_labels, label_mapping, clases_nombres = procesar_etiquetas_automatico(clases)

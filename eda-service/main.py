@@ -1,7 +1,6 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-import os
 import numpy as np
 from collections import Counter
 
@@ -18,13 +17,8 @@ from supabase_service import (
     get_eda_results,
 )
 
-from utils import parse_dataset_json
-
-###############
-
-DATASET_STORAGE_PATH = os.environ.get("DATASET_STORAGE_PATH", "./data/datasets")
-
-###############
+from utils import build_dataframe_from_chroma
+from chroma_reader import fetch_paginated
 
 app = FastAPI()
 
@@ -139,12 +133,18 @@ async def main(
 
     dataset_info = get_dataset_info(supabase, data.dataset, x_user_id)
     dataset_id = dataset_info["dataset_id"]
-    dataset_path = os.path.join(DATASET_STORAGE_PATH, "users", x_user_id, f"{dataset_id}.json")
-    
-    if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail=f"Dataset file not found at {dataset_path}")
+    # Pide solo documents+metadatas, paginado.
+    chroma_data = await fetch_paginated(
+        {"$and": [{"user_id": x_user_id}, {"dataset_id": dataset_id}]},
+        ["documents", "metadatas"],
+    )
+    if not chroma_data.get("ids"):
+        raise HTTPException(status_code=404, detail="No documents found for dataset in Chroma")
 
-    dataset = parse_dataset_json(dataset_path)
+    dataset = build_dataframe_from_chroma(
+        chroma_data.get("documents", []),
+        chroma_data.get("metadatas", []),
+    )
     if dataset.empty:
         raise HTTPException(status_code=400, detail="Dataset is empty")
 

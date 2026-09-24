@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 from collections import Counter
 from typing import Optional
 
@@ -58,45 +59,80 @@ def get_supabase_client(user_jwt: str):
     return client
 
 
+CHROMA_HOST = os.environ.get("CHROMA_HOST", "chroma-service")
+CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents")
+CHROMA_PAGE_SIZE = int(os.environ.get("CHROMA_PAGE_SIZE", "2000"))
+
+_chroma_client = None
+_chroma_collection = None
+
+
 def get_chroma_collection():
-    client = chromadb.HttpClient(host="chroma-service", port=8000)
-    return client.get_collection(name="documents")
+    """Singleton: no crear HttpClient por request."""
+    global _chroma_client, _chroma_collection
+    if _chroma_collection is not None:
+        return _chroma_collection
+    if _chroma_client is None:
+        _chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+    _chroma_collection = _chroma_client.get_collection(name=CHROMA_COLLECTION)
+    return _chroma_collection
 
 
-def obtener_resultados_paginados(
-    collection, 
-    where_filter: dict, 
-    include_fields: list, 
-    limite_por_pagina: int = 10000
+def _obtener_pagina_sync(collection, where_filter: dict, include_fields: list, limit: int, offset: int) -> dict:
+    return collection.get(
+        where=where_filter,
+        include=include_fields,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def obtener_resultados_paginados_sync(
+    collection,
+    where_filter: dict,
+    include_fields: list,
+    limite_por_pagina: int = CHROMA_PAGE_SIZE,
 ) -> dict:
+    """Paginado robusto: `ids` como conteo canónico (no include_fields[0])."""
     resultados_acumulados = {campo: [] for campo in include_fields}
+    resultados_acumulados["ids"] = []
     offset = 0
-    hay_mas_resultados = True
 
-    while hay_mas_resultados:
-        pagina = collection.get(
-            where=where_filter,
-            include=include_fields,
-            limit=limite_por_pagina,
-            offset=offset,
+    while True:
+        pagina = _obtener_pagina_sync(
+            collection, where_filter, include_fields, limite_por_pagina, offset
         )
 
-        campo_base = include_fields[0]
-        datos_pagina = pagina.get(campo_base) or []
+        ids = pagina.get("ids") or []
+        if not ids:
+            break
 
-        if not datos_pagina:
-            hay_mas_resultados = False
-        else:
-            for campo in include_fields:
-                if pagina.get(campo):
-                    resultados_acumulados[campo].extend(pagina[campo])
-            
-            if len(datos_pagina) < limite_por_pagina:
-                hay_mas_resultados = False
-            else:
-                offset += limite_por_pagina
+        resultados_acumulados["ids"].extend(ids)
+        for campo in include_fields:
+            resultados_acumulados[campo].extend(pagina.get(campo) or [])
+
+        offset += len(ids)
+        if len(ids) < limite_por_pagina:
+            break
 
     return resultados_acumulados
+
+
+async def obtener_resultados_paginados(
+    collection,
+    where_filter: dict,
+    include_fields: list,
+    limite_por_pagina: int = CHROMA_PAGE_SIZE,
+) -> dict:
+    """Wrapper async: el HttpClient de Chroma es bloqueante → to_thread."""
+    return await asyncio.to_thread(
+        obtener_resultados_paginados_sync,
+        collection,
+        where_filter,
+        include_fields,
+        limite_por_pagina,
+    )
 
 def tokenizar(texto: str) -> list[str]:
     texto = URL_RE.sub(" ", texto.lower())
@@ -185,7 +221,7 @@ async def obtener_usuarios(
 
         response = (
             supabase.table("datasets")
-            .select("*")
+            .select("dataset_id")
             .eq("dataset_name", data.dataset)
             .eq("user_id", x_user_id)
             .execute()
@@ -207,7 +243,7 @@ async def obtener_usuarios(
                 {"dataset_id": dataset_id},
             ]
         }
-        resultados_totales = obtener_resultados_paginados(collection, filtros, ["metadatas"])
+        resultados_totales = await obtener_resultados_paginados(collection, filtros, ["metadatas"])
         metadatas = resultados_totales.get("metadatas", [])
 
         if not metadatas:
@@ -264,7 +300,7 @@ async def evolucion_palabras(
 
         response = (
             supabase.table("datasets")
-            .select("*")
+            .select("dataset_id")
             .eq("dataset_name", data.dataset)
             .eq("user_id", x_user_id)
             .execute()
@@ -287,7 +323,7 @@ async def evolucion_palabras(
                 {"remitente": data.remitente},
             ]
         }
-        resultados_totales = obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
+        resultados_totales = await obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
         
         documentos = resultados_totales.get("documents", [])
         metadatas = resultados_totales.get("metadatas", [])

@@ -19,9 +19,6 @@ from pydantic import BaseModel, Field
 
 from chroma_repository import ChromaRepository
 from config import get_settings
-from dataset_storage import (
-    LocalJsonDatasetStorage,
-)
 from dependencies import (
     RequestContext,
     get_request_context,
@@ -80,10 +77,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-dataset_storage = LocalJsonDatasetStorage(
-    base_path=settings.dataset_storage_path
-)
-
 supabase_repository = SupabaseRepository()
 
 chroma_repository = ChromaRepository()
@@ -91,7 +84,6 @@ chroma_repository = ChromaRepository()
 embedding_provider = LocalSentenceTransformerProvider()
 
 dataset_service = DatasetService(
-    dataset_storage=dataset_storage,
     supabase_repository=supabase_repository,
     chroma_repository=chroma_repository,
     embedding_provider=embedding_provider,

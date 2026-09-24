@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from typing import Any
 import math 
 from chroma_repository import ChromaRepository
-from dataset_storage import DatasetStorage
 from embeddings import EmbeddingProvider
 from models import (
     DatasetDocument,
@@ -21,13 +20,10 @@ class DatasetService:
 
     def __init__(
         self,
-        dataset_storage: DatasetStorage,
         supabase_repository: SupabaseRepository,
         chroma_repository: ChromaRepository,
         embedding_provider: EmbeddingProvider,
     ) -> None:
-
-        self.storage = dataset_storage
 
         self.supabase = supabase_repository
 
@@ -238,10 +234,6 @@ class DatasetService:
 
         try:
 
-            await self.storage.save(
-                dataset
-            )
-
             self.chroma.add_documents(
                 ids=chroma_data.ids,
                 documents=chroma_data.documents,
@@ -297,16 +289,6 @@ class DatasetService:
         except Exception:
             pass
 
-        try:
-
-            await self.storage.delete_dataset(
-                user_id=dataset.user_id,
-                dataset_id=dataset.dataset_id,
-            )
-
-        except Exception:
-            pass
-
 
     async def get_datasets(
         self,
@@ -352,11 +334,6 @@ class DatasetService:
                 dataset_id=dataset_id,
             )
 
-            await self.storage.delete_dataset(
-                user_id=user_id,
-                dataset_id=dataset_id,
-            )
-
         except Exception as e:
             print(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
             raise
@@ -376,10 +353,6 @@ class DatasetService:
             )
 
             self.chroma.delete_documents_by_user(
-                user_id=user_id,
-            )
-
-            await self.storage.delete_datasets_by_user(
                 user_id=user_id,
             )
 
