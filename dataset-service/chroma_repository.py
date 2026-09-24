@@ -29,12 +29,27 @@ class ChromaRepository:
             **client_kwargs
         )
 
-        self.collection = (
-            self.client.get_or_create_collection(
-                name=(
-                    settings.chroma_collection_name
-                )
+        self.settings = settings
+        self.collections: dict[str, Any] = {}
+
+    def _get_collection(self, name: str | None = None):
+        name = name or self.settings.chroma_collection_name
+
+        if name not in self.collections:
+            self.collections[name] = (
+                self.client.get_or_create_collection(name=name)
             )
+
+        return self.collections[name]
+
+    @property
+    def collection(self):
+        return self._get_collection()
+
+    @property
+    def chunked_collection(self):
+        return self._get_collection(
+            self.settings.chroma_chunked_collection_name
         )
 
     def add_documents(
@@ -44,6 +59,7 @@ class ChromaRepository:
         metadatas: list[dict[str, Any]],
         embeddings: list[list[float]] | None = None,
         batch_size: int = 2000,
+        collection_name: str | None = None,
     ) -> None:
         total = len(ids)
 
@@ -81,13 +97,21 @@ class ChromaRepository:
                 payload["embeddings"] = embeddings[i:fin]
 
             # Inserción en Chroma
-            self.collection.add(**payload)
+            self._get_collection(collection_name).add(**payload)
 
     def delete_documents_by_dataset(
         self,
         dataset_id: str,
     ) -> None:
-        self.collection.delete(
+        self._get_collection().delete(
+            where={"dataset_id": dataset_id}
+        )
+
+    def delete_chunked_by_dataset(
+        self,
+        dataset_id: str,
+    ) -> None:
+        self.chunked_collection.delete(
             where={"dataset_id": dataset_id}
         )
 
@@ -95,6 +119,14 @@ class ChromaRepository:
         self,
         user_id: str,
     ) -> None:
-        self.collection.delete(
+        self._get_collection().delete(
+            where={"user_id": user_id}
+        )
+
+    def delete_chunked_by_user(
+        self,
+        user_id: str,
+    ) -> None:
+        self.chunked_collection.delete(
             where={"user_id": user_id}
         )

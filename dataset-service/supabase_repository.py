@@ -58,6 +58,7 @@ class SupabaseRepository:
         dataset_size=int,
         embedding_size=int,
         embedding_chunked_size=int,
+        tipo: str = "dataset",
     ) -> None:
         
         supabase = self.get_supabase_client(user_token)
@@ -69,6 +70,7 @@ class SupabaseRepository:
             "dataset_size": dataset_size,
             "embedding_size": embedding_size,
             "embedding_chunked_size": embedding_chunked_size,
+            "tipo": tipo,
         }
 
         try: 

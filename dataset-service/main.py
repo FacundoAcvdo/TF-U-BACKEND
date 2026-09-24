@@ -136,6 +136,10 @@ async def create_dataset(
         default=None
     ),
 
+    esChat: bool = Form(
+        default=False
+    ),
+
     context: Annotated[
         RequestContext,
         Depends(get_request_context),
@@ -241,6 +245,7 @@ async def create_dataset(
                 formato_original=formatoOriginal,
                 formato_detectado=formatoDetectado,
                 formato_fecha=formatoFecha,
+                es_chat=esChat,
                 user_id=x_user_id,
                 user_token=x_user_token
             )

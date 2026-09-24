@@ -112,7 +112,7 @@ async def send_message(
             
             dataset_id = row.get("dataset_id")
             tipo = (row.get("tipo") or "").strip().lower()
-            if tipo in ("chunked_chat", "chunked_chats", "chunked"):
+            if tipo in ("chat", "chunked_chat", "chunked_chats", "chunked"):
                 collection = "chunked_chats"
             else:
                 collection = "documents"

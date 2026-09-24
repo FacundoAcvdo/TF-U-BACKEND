@@ -5,7 +5,7 @@ import chromadb
 
 CHROMA_HOST = os.environ.get("CHROMA_HOST", "chroma-service")
 CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
-CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents_e5")
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents")
 PAGE_SIZE = int(os.environ.get("CHROMA_PAGE_SIZE", "2000"))
 
 _client = None

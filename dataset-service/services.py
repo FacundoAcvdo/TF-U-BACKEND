@@ -44,6 +44,7 @@ class DatasetService:
         formato_original: str | None,
         formato_detectado: str | None,
         formato_fecha: str | None = None,
+        es_chat: bool = False,
         user_id: str,
         user_token: str,
     ) -> DatasetInfo:
@@ -71,6 +72,7 @@ class DatasetService:
             formato_original=formato_original,
             formato_detectado=formato_detectado,
             formato_fecha=formato_fecha,
+            es_Chat=es_Chat,
         )
 
         dataset = self._build_dataset_document(
@@ -93,24 +95,37 @@ class DatasetService:
         all_embeddings: list[list[float]] = []
 
         try:
-            total = len(chroma_data.ids)
+            await self._embed_and_insert(
+                ids=chroma_data.ids,
+                documents=chroma_data.documents,
+                metadatas=chroma_data.metadatas,
+                chunk_size=chunk_size,
+                all_embeddings=all_embeddings,
+                collection_name=None,
+            )
 
-            for inicio in range(0, total, chunk_size):
-                fin = min(inicio + chunk_size, total)
+            chunked_count = 0
 
-                embeddings = await asyncio.to_thread(
-                    self.embedding_provider.embed_documents,
-                    chroma_data.documents[inicio:fin],
+            if es_chat:
+                chunked = self._build_chat_chunks(
+                    dataset_id=dataset_id,
+                    user_id=user_id,
+                    dataset_name=dataset_name,
+                    documents=documents,
                 )
-                all_embeddings.extend(embeddings)
 
-                await asyncio.to_thread(
-                    self.chroma.add_documents,
-                    ids=chroma_data.ids[inicio:fin],
-                    documents=chroma_data.documents[inicio:fin],
-                    metadatas=chroma_data.metadatas[inicio:fin],
-                    embeddings=embeddings,
+                await self._embed_and_insert(
+                    ids=chunked.ids,
+                    documents=chunked.documents,
+                    metadatas=chunked.metadatas,
+                    chunk_size=chunk_size,
+                    all_embeddings=None,
+                    collection_name=(
+                        get_settings().chroma_chunked_collection_name
+                    ),
                 )
+
+                chunked_count = len(chunked.ids)
 
             embedding_size_bytes = self.embedding_provider.calculate_embedding_size_bytes(
                 all_embeddings
@@ -125,7 +140,8 @@ class DatasetService:
                 # todo el dataset a JSON solo para medirlo).
                 dataset_size=len(content),
                 embedding_size=embedding_size_bytes,
-                embedding_chunked_size=0,
+                embedding_chunked_size=chunked_count,
+                tipo="chat" if es_chat else "dataset",
             )
 
         except Exception:
@@ -267,6 +283,106 @@ class DatasetService:
             metadatas=metadatas,
         )
 
+    async def _embed_and_insert(
+        self,
+        *,
+        ids: list[str],
+        documents: list[str],
+        metadatas: list[dict[str, Any]],
+        chunk_size: int,
+        all_embeddings: list[list[float]] | None,
+        collection_name: str | None,
+    ) -> None:
+        """Embebe e inserta por bloques en threads (no bloquea el loop)."""
+        total = len(ids)
+
+        for inicio in range(0, total, chunk_size):
+            fin = min(inicio + chunk_size, total)
+
+            embeddings = await asyncio.to_thread(
+                self.embedding_provider.embed_documents,
+                documents[inicio:fin],
+            )
+
+            if all_embeddings is not None:
+                all_embeddings.extend(embeddings)
+
+            await asyncio.to_thread(
+                self.chroma.add_documents,
+                ids=ids[inicio:fin],
+                documents=documents[inicio:fin],
+                metadatas=metadatas[inicio:fin],
+                embeddings=embeddings,
+                collection_name=collection_name,
+            )
+
+    def _build_chat_chunks(
+        self,
+        *,
+        dataset_id: str,
+        user_id: str,
+        dataset_name: str,
+        documents: list[Document],
+    ) -> ChromaDocuments:
+        """Ventanas de N mensajes con solapamiento, ordenadas por fecha.
+
+        Cada fila es un mensaje. Se ordena por fecha (sin fecha al final,
+        orden estable) y se emiten ventanas de `chat_chunk_size` mensajes
+        con `chat_chunk_overlap` de solapamiento.
+        """
+        settings = get_settings()
+        size = max(1, settings.chat_chunk_size)
+        overlap = max(0, min(settings.chat_chunk_overlap, size - 1))
+        paso = size - overlap
+
+        ordenados = sorted(
+            documents,
+            key=lambda d: (d.fecha is None, d.fecha or ""),
+        )
+
+        total = len(ordenados)
+        ids: list[str] = []
+        texts: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+
+        embedding_model = str(
+            getattr(self.embedding_provider, "model_name", "unknown")
+        )
+
+        chunk_index = 0
+        inicio = 0
+        while inicio < total:
+            fin = min(inicio + size, total)
+            ventana = ordenados[inicio:fin]
+
+            fechas = [d.fecha for d in ventana if d.fecha]
+
+            meta: dict[str, str | int | float | bool] = {
+                "dataset_id": str(dataset_id),
+                "user_id": str(user_id),
+                "source_filename": str(dataset_name or ""),
+                "embedding_model": embedding_model,
+                "chunk_index": chunk_index,
+                "chunk_size": len(ventana),
+            }
+
+            if fechas:
+                meta["fecha_desde"] = fechas[0]
+                meta["fecha_hasta"] = fechas[-1]
+
+            ids.append(str(uuid.uuid4()))
+            texts.append("\n".join(d.texto for d in ventana))
+            metadatas.append(meta)
+
+            chunk_index += 1
+            inicio += paso
+
+        return ChromaDocuments(
+            ids=ids,
+            documents=texts,
+            metadatas=metadatas,
+        )
+
     async def _rollback_dataset(
         self,
         *,
@@ -290,6 +406,15 @@ class DatasetService:
 
             self.chroma.delete_documents(
                 ids=chroma_ids,
+            )
+
+        except Exception:
+            pass
+
+        try:
+
+            self.chroma.delete_chunked_by_dataset(
+                dataset_id=dataset.dataset_id,
             )
 
         except Exception:
@@ -340,6 +465,10 @@ class DatasetService:
                 dataset_id=dataset_id,
             )
 
+            self.chroma.delete_chunked_by_dataset(
+                dataset_id=dataset_id,
+            )
+
         except Exception as e:
             print(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
             raise
@@ -359,6 +488,10 @@ class DatasetService:
             )
 
             self.chroma.delete_documents_by_user(
+                user_id=user_id,
+            )
+
+            self.chroma.delete_chunked_by_user(
                 user_id=user_id,
             )
 

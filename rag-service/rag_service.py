@@ -30,11 +30,10 @@ DOCS_PATH = os.environ.get("DOCS_PATH", "/app/data/rag_docs")
 
 RAG_INIT_ON_STARTUP = os.environ.get("RAG_INIT_ON_STARTUP", "false").lower() in ("true", "1", "yes", "on")
 
-# Nombres de colecciones (versionadas "_e5": los vectores e5-large de
-# 1024 dims no son compatibles con los anteriores de 384 dims).
-RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs_e5")
-DOCUMENTS_COLLECTION = os.environ.get("CHROMA_COLLECTION_DOCUMENTS", "documents_e5")
-CHUNKED_CHATS_COLLECTION = os.environ.get("CHROMA_COLLECTION_CHUNKED", "chunked_chats_e5")
+# Nombres de colecciones (configurables por env).
+RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs")
+DOCUMENTS_COLLECTION = os.environ.get("CHROMA_COLLECTION_DOCUMENTS", "documents")
+CHUNKED_CHATS_COLLECTION = os.environ.get("CHROMA_COLLECTION_CHUNKED", "chunked_chats")
 
 ALL_COLLECTIONS = {
     "rag_docs": RAG_DOCS_COLLECTION,

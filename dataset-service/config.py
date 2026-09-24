@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     chroma_host: str = ""
     chroma_port: int = 0
     chroma_token: str = ""
-    chroma_collection_name: str = "documents_e5"
+    chroma_collection_name: str = "documents"
+    chroma_chunked_collection_name: str = "chunked_chats"
 
     embedding_provider: str = "none"
     embedding_model: str = "intfloat/multilingual-e5-large"
@@ -29,6 +30,9 @@ class Settings(BaseSettings):
     embedding_fp16: bool = True
 
     ingest_chunk_size: int = 2000
+
+    chat_chunk_size: int = 20
+    chat_chunk_overlap: int = 4
 
     model_config = SettingsConfigDict(
         env_file=".env",
