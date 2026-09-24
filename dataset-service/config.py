@@ -20,10 +20,15 @@ class Settings(BaseSettings):
     chroma_host: str = ""
     chroma_port: int = 0
     chroma_token: str = ""
-    chroma_collection_name: str = "documents"
+    chroma_collection_name: str = "documents_e5"
 
     embedding_provider: str = "none"
-    embedding_model: str = ""
+    embedding_model: str = "intfloat/multilingual-e5-large"
+    embedding_batch_size: int = 64
+    embedding_device: str = "auto"
+    embedding_fp16: bool = True
+
+    ingest_chunk_size: int = 2000
 
     model_config = SettingsConfigDict(
         env_file=".env",

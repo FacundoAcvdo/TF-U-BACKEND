@@ -58,7 +58,7 @@ async def detectar_menciones(
             )
         dataset_id = response.data[0].get("dataset_id")
 
-        collection = get_collection("documents")
+        collection = get_collection()
 
         filtros = {
             "$and": [

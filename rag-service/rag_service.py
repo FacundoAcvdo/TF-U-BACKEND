@@ -4,6 +4,7 @@ import glob
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
+import torch
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
@@ -16,7 +17,8 @@ from chroma_service import get_chroma_client, get_or_create_collection
 from prompts import PROMPTS
 
 # ----------------- Config -----------------
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3.6-flash")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
@@ -28,10 +30,11 @@ DOCS_PATH = os.environ.get("DOCS_PATH", "/app/data/rag_docs")
 
 RAG_INIT_ON_STARTUP = os.environ.get("RAG_INIT_ON_STARTUP", "false").lower() in ("true", "1", "yes", "on")
 
-# Nombres de colecciones
-RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs")
-DOCUMENTS_COLLECTION = os.environ.get("CHROMA_COLLECTION_DOCUMENTS", "documents")
-CHUNKED_CHATS_COLLECTION = os.environ.get("CHROMA_COLLECTION_CHUNKED", "chunked_chats")
+# Nombres de colecciones (versionadas "_e5": los vectores e5-large de
+# 1024 dims no son compatibles con los anteriores de 384 dims).
+RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs_e5")
+DOCUMENTS_COLLECTION = os.environ.get("CHROMA_COLLECTION_DOCUMENTS", "documents_e5")
+CHUNKED_CHATS_COLLECTION = os.environ.get("CHROMA_COLLECTION_CHUNKED", "chunked_chats_e5")
 
 ALL_COLLECTIONS = {
     "rag_docs": RAG_DOCS_COLLECTION,
@@ -55,6 +58,28 @@ def _format_history(chat_history: List[dict]) -> str:
     return "\n".join(lines)
 
 
+class E5Embeddings(HuggingFaceEmbeddings):
+    """HuggingFaceEmbeddings con prefijos obligatorios de E5.
+
+    Documentos indexados -> "passage: ", consultas -> "query: ".
+    Sin prefijos la calidad de recuperación cae fuerte.
+    """
+    query_prefix: str = "query: "
+    passage_prefix: str = "passage: "
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return super().embed_documents(
+            [
+                t if t.startswith(self.passage_prefix)
+                else f"{self.passage_prefix}{t}"
+                for t in texts
+            ]
+        )
+
+    def embed_query(self, text: str) -> List[float]:
+        return super().embed_query(f"{self.query_prefix}{text}")
+
+
 class RAGService:
     def __init__(self):
         self.embeddings = None
@@ -66,8 +91,21 @@ class RAGService:
 
     # ---------- Embeddings ----------
     def _init_embeddings(self):
-        self.embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-        print("[rag_service] Embeddings inicializados")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.embeddings = E5Embeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={"device": device},
+            encode_kwargs={
+                "normalize_embeddings": True,
+                "batch_size": EMBEDDING_BATCH_SIZE,
+            },
+        )
+        if device == "cuda":
+            try:
+                self.embeddings.client.half()
+            except Exception as e:
+                print(f"[rag_service] WARNING no se pudo usar fp16: {e}")
+        print(f"[rag_service] Embeddings '{EMBEDDING_MODEL}' en {device}")
 
     # ---------- LLM ----------
     def _init_llm(self):

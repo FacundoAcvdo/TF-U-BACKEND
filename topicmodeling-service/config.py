@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     chroma_host: str = ""
     chroma_port: int = 0
     chroma_token: str = ""
-    chroma_collection_name: str = "documents"
+    chroma_collection_name: str = "documents_e5"
 
     google_api_key: str = ""
     llm_model: str = "gemini-2.0-flash"

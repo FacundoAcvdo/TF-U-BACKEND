@@ -6,12 +6,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
 
     cleaning_download_path: str = "./data/temp_downloads"
-
-    chroma_host: str = "chroma-service"
-    chroma_port: int = 8000
-    chroma_collection_name: str = "documents"
-    chroma_page_size: int = 2000
-    
     supabase_url: str = ""
     supabase_secret_key: str = ""
     supabase_anon_key: str = ""

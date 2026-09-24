@@ -1,8 +1,10 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-import math 
+import math
 from chroma_repository import ChromaRepository
+from config import get_settings
 from embeddings import EmbeddingProvider
 from models import (
     DatasetDocument,
@@ -50,15 +52,17 @@ class DatasetService:
             uuid.uuid4()
         )
 
-        dataset_name = (
-            self.supabase.get_available_dataset_name(
-                user_id=user_id,
-                filename=filename,
-                user_token=user_token,
-            )
+        # Lookup de nombre en thread: supabase-py es bloqueante.
+        dataset_name = await asyncio.to_thread(
+            self.supabase.get_available_dataset_name,
+            user_id=user_id,
+            filename=filename,
+            user_token=user_token,
         )
 
-        documents = self._parse_documents(
+        # Parseo en thread: CPU-bound (pandas/polars).
+        documents = await asyncio.to_thread(
+            self._parse_documents,
             content=content,
             filename=filename,
             columna_texto=columna_texto,
@@ -83,24 +87,56 @@ class DatasetService:
             documents=documents,
         )
 
-        embeddings = self.embedding_provider.embed_documents(
-            texts=chroma_data.documents,
-        )
+        # Embed + insert por chunks (streaming): acota RAM y solapa GPU/red.
+        # Sin materializar N vectores antes del primer insert.
+        chunk_size = get_settings().ingest_chunk_size
+        all_embeddings: list[list[float]] = []
 
-        chroma_data.embeddings = embeddings
+        try:
+            total = len(chroma_data.ids)
 
-        dataset_size_bytes = dataset.to_json_bytes()
-        dataset_size_bytes = len(dataset_size_bytes)
+            for inicio in range(0, total, chunk_size):
+                fin = min(inicio + chunk_size, total)
 
-        embedding_size_bytes = self.embedding_provider.calculate_embedding_size_bytes(embeddings)
+                embeddings = await asyncio.to_thread(
+                    self.embedding_provider.embed_documents,
+                    chroma_data.documents[inicio:fin],
+                )
+                all_embeddings.extend(embeddings)
 
-        await self._persist_dataset(
-            dataset=dataset,
-            chroma_data=chroma_data,
-            user_token=user_token,
-            dataset_size_bytes=dataset_size_bytes,
-            embedding_size_bytes=embedding_size_bytes,
-        )
+                await asyncio.to_thread(
+                    self.chroma.add_documents,
+                    ids=chroma_data.ids[inicio:fin],
+                    documents=chroma_data.documents[inicio:fin],
+                    metadatas=chroma_data.metadatas[inicio:fin],
+                    embeddings=embeddings,
+                )
+
+            embedding_size_bytes = self.embedding_provider.calculate_embedding_size_bytes(
+                all_embeddings
+            )
+
+            await self.supabase.create_dataset(
+                dataset_id=dataset.dataset_id,
+                user_id=dataset.user_id,
+                filename=dataset.filename,
+                user_token=user_token,
+                # Tamaño del archivo original subido (sin serializar
+                # todo el dataset a JSON solo para medirlo).
+                dataset_size=len(content),
+                embedding_size=embedding_size_bytes,
+                embedding_chunked_size=0,
+            )
+
+        except Exception:
+
+            await self._rollback_dataset(
+                dataset=dataset,
+                chroma_ids=chroma_data.ids,
+                user_token=user_token,
+            )
+
+            raise
 
         return DatasetInfo(
             dataset_id=dataset.dataset_id,
@@ -200,6 +236,15 @@ class DatasetService:
                 "dataset_id": str(dataset_id),
                 "user_id": str(user_id),
                 "source_filename": str(dataset_name or ""),
+                # Versionado: permite detectar vectores de otro modelo
+                # (las dims deben coincidir dentro de la colección).
+                "embedding_model": str(
+                    getattr(
+                        self.embedding_provider,
+                        "model_name",
+                        "unknown",
+                    )
+                ),
             }
 
             for k, v in raw_meta.items():
@@ -221,45 +266,6 @@ class DatasetService:
             documents=texts,
             metadatas=metadatas,
         )
-
-    async def _persist_dataset(
-        self,
-        *,
-        dataset: DatasetDocument,
-        chroma_data: ChromaDocuments,
-        user_token: str,
-        dataset_size_bytes: int,
-        embedding_size_bytes: int,
-    ) -> None:
-
-        try:
-
-            self.chroma.add_documents(
-                ids=chroma_data.ids,
-                documents=chroma_data.documents,
-                metadatas=chroma_data.metadatas,
-                embeddings=chroma_data.embeddings,
-            )
-
-            await self.supabase.create_dataset(
-                dataset_id=dataset.dataset_id,
-                user_id=dataset.user_id,
-                filename=dataset.filename,
-                user_token=user_token,
-                dataset_size=dataset_size_bytes,
-                embedding_size=embedding_size_bytes,
-                embedding_chunked_size=0,
-            )
-
-        except Exception:
-
-            await self._rollback_dataset(
-                dataset=dataset,
-                chroma_ids=chroma_data.ids,
-                user_token=user_token,
-            )
-
-            raise
 
     async def _rollback_dataset(
         self,

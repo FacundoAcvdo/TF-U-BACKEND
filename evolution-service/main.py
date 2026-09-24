@@ -61,7 +61,7 @@ def get_supabase_client(user_jwt: str):
 
 CHROMA_HOST = os.environ.get("CHROMA_HOST", "chroma-service")
 CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
-CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents")
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents_e5")
 CHROMA_PAGE_SIZE = int(os.environ.get("CHROMA_PAGE_SIZE", "2000"))
 
 _chroma_client = None

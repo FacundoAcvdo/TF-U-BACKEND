@@ -1,6 +1,4 @@
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
-import json
+from dataclasses import dataclass, field
 from typing import Any
 import math
 
@@ -16,15 +14,6 @@ class Document:
     metadata: dict[str, Any] = field(
         default_factory=dict
     )
-
-    def to_dict(self) -> dict[str, Any]:
-
-        return {
-            "texto": self.texto,
-            "clase": self.clase,
-            "fecha": self.fecha,
-            "metadata": self.metadata,
-        }
 
     def to_chroma_metadata(
         self,
@@ -69,27 +58,6 @@ class DatasetDocument:
     documents: list[Document]
 
     version: str = "1.0"
-
-    def to_dict(self) -> dict[str, Any]:
-
-        return {
-            "version": self.version,
-            "dataset_id": self.dataset_id,
-            "user_id": self.user_id,
-            "filename": self.filename,
-            "created_at": self.created_at,
-            "documents": [
-                document.to_dict()
-                for document in self.documents
-            ],
-        }
-
-    def to_json_bytes(self) -> bytes:
-        return json.dumps(
-            asdict(self),
-            ensure_ascii=False,
-            default=str,
-        ).encode("utf-8")
 
 
 @dataclass

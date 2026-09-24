@@ -9,6 +9,7 @@ from supabase import create_client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents_e5")
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2") #Si no tengo en el env usa el modelo por defecto
 
 
@@ -64,7 +65,9 @@ def get_chroma_client(intentos: int = 10, espera_inicial: float = 1.0):
     )
 
 
-def get_collection(nombre: str = "documents"):
+def get_collection(nombre: str | None = None):
+    if nombre is None:
+        nombre = CHROMA_COLLECTION
     if nombre not in _collection_cache:
         _collection_cache[nombre] = get_chroma_client().get_collection(name=nombre)
     return _collection_cache[nombre]

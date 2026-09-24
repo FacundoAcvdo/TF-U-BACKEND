@@ -1,4 +1,6 @@
 import os
+import tempfile
+from pathlib import Path
 from typing import Annotated
 
 from contextlib import asynccontextmanager
@@ -81,7 +83,12 @@ supabase_repository = SupabaseRepository()
 
 chroma_repository = ChromaRepository()
 
-embedding_provider = LocalSentenceTransformerProvider()
+embedding_provider = LocalSentenceTransformerProvider(
+    model_name=settings.embedding_model or "intfloat/multilingual-e5-large",
+    batch_size=settings.embedding_batch_size,
+    device=settings.embedding_device,
+    fp16=settings.embedding_fp16,
+)
 
 dataset_service = DatasetService(
     supabase_repository=supabase_repository,
@@ -168,32 +175,53 @@ async def create_dataset(
             ),
         )
 
-    content = await archivo.read()
-
     max_size = (
         settings.max_upload_size_mb
         * 1024
         * 1024
     )
 
-    if len(content) > max_size:
+    # Spool a disco por chunks de 1 MB: RAM acotada y aborto temprano
+    # con 413 en cuanto se supera el límite (sin leer todo el archivo).
+    upload_tmp: Path | None = None
+    tamaño = 0
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=extension
+        ) as tmp:
+            upload_tmp = Path(tmp.name)
 
-        raise HTTPException(
-            status_code=(
-                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-            ),
-            detail=(
-                f"El archivo supera el límite "
-                f"de {settings.max_upload_size_mb} MB."
-            ),
-        )
+            while True:
+                pedazo = await archivo.read(1024 * 1024)
 
-    if not content:
+                if not pedazo:
+                    break
 
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El archivo está vacío.",
-        )
+                tamaño += len(pedazo)
+
+                if tamaño > max_size:
+                    raise HTTPException(
+                        status_code=(
+                            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                        ),
+                        detail=(
+                            f"El archivo supera el límite "
+                            f"de {settings.max_upload_size_mb} MB."
+                        ),
+                    )
+
+                tmp.write(pedazo)
+
+        if tamaño == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El archivo está vacío.",
+            )
+
+        content = upload_tmp.read_bytes()
+    finally:
+        if upload_tmp is not None:
+            upload_tmp.unlink(missing_ok=True)
 
     try:
 
