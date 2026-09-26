@@ -20,7 +20,6 @@ class ChromaService:
         self._page_size = int(os.environ.get("CHROMA_PAGE_SIZE", "2000"))
 
     def _get_collection(self):
-        # Reutiliza collection (no pedirla por request).
         if self._collection is None:
             self._collection = self.client.get_collection(
                 name=get_settings().chroma_collection_name
@@ -43,13 +42,18 @@ class ChromaService:
                 where=where, include=include,
                 limit=self._page_size, offset=offset,
             )
-            ids = page.get("ids") or []
+            ids = page.get("ids")
+            if ids is None:
+                ids = []
             if not ids:
                 break
             out["ids"].extend(ids)
-            out["documents"].extend(page.get("documents") or [])
-            out["embeddings"].extend(page.get("embeddings") or [])
-            out["metadatas"].extend(page.get("metadatas") or [])
+            documents = page.get("documents")
+            out["documents"].extend(documents if documents is not None else [])
+            embeddings = page.get("embeddings")
+            out["embeddings"].extend(embeddings if embeddings is not None else [])
+            metadatas = page.get("metadatas")
+            out["metadatas"].extend(metadatas if metadatas is not None else [])
             offset += len(ids)
             if len(ids) < self._page_size:
                 break

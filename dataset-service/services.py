@@ -72,7 +72,7 @@ class DatasetService:
             formato_original=formato_original,
             formato_detectado=formato_detectado,
             formato_fecha=formato_fecha,
-            es_Chat=es_Chat,
+            es_chat=es_chat,
         )
 
         dataset = self._build_dataset_document(
@@ -175,6 +175,7 @@ class DatasetService:
         formato_original: str | None,
         formato_detectado: str | None,
         formato_fecha: str | None = None,
+        es_chat: bool = False,
     ) -> list[Document]:
 
         parser = ParserFactory.get_parser(

@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
-RUN pip install --no-cache-dir --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x[ctk]" || pip install --no-cache-dir --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x" || echo "[clustering-service] cuML no instalado - fallback CPU"
+RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x[ctk]" || pip install --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x" || echo "[clustering-service] cuML no instalado - fallback CPU"
 
 COPY . .
 

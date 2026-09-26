@@ -38,8 +38,9 @@ def _get_embeddings_sync(dataset_id: str, user_id: str, page_size: int = PAGE_SI
         ids = pagina.get("ids") or []
         if not ids:
             break
-        emb = pagina.get("embeddings") or []
-        if emb:
+        emb = pagina.get("embeddings")
+
+        if emb is not None and len(emb) > 0:
             bloques.append(np.asarray(emb, dtype=np.float32))
         offset += len(ids)
         if len(ids) < page_size:
