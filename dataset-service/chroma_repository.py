@@ -130,3 +130,11 @@ class ChromaRepository:
         self.chunked_collection.delete(
             where={"user_id": user_id}
         )
+
+    def has_remaining(self, where: dict) -> bool:
+        """True si queda al menos un vector con ese filtro en alguna colección."""
+        for collection in (self.collection, self.chunked_collection):
+            result = collection.get(where=where, limit=1)
+            if result.get("ids"):
+                return True
+        return False

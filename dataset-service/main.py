@@ -8,6 +8,7 @@ import logging
 import torch
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -307,6 +308,7 @@ async def getDataset(
 
 @app.delete("/deleteDataset")
 async def deleteDataset(
+    background_tasks: BackgroundTasks,
     dataset_id: str,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
@@ -316,6 +318,10 @@ async def deleteDataset(
             dataset_id=dataset_id,
             user_id=x_user_id,
             user_token=x_user_token
+        )
+        background_tasks.add_task(
+            dataset_service.delete_dataset_vectors,
+            dataset_id=dataset_id,
         )
         return {
             "status": "success",
@@ -328,6 +334,7 @@ async def deleteDataset(
 
 @app.delete("/deleteDatasetsByUser")
 async def deleteDatasetsByUser(
+    background_tasks: BackgroundTasks,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
 ):
@@ -335,6 +342,10 @@ async def deleteDatasetsByUser(
         await dataset_service.delete_datasets_by_user(
             user_id=x_user_id,
             user_token=x_user_token
+        )
+        background_tasks.add_task(
+            dataset_service.delete_user_vectors,
+            user_id=x_user_id,
         )
         return {
             "status": "success",

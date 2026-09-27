@@ -6,5 +6,5 @@ numpy
 pandas
 chromadb
 supabase
-transformers
+transformers>=4.44.0,<4.49.0
 accelerate

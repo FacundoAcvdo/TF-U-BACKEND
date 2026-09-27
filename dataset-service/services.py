@@ -1,4 +1,6 @@
-import asyncio
+﻿import asyncio
+import json
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -105,6 +107,7 @@ class DatasetService:
             )
 
             chunked_count = 0
+            chunked_payload_bytes = 0
 
             if es_chat:
                 chunked = self._build_chat_chunks(
@@ -127,20 +130,36 @@ class DatasetService:
 
                 chunked_count = len(chunked.ids)
 
+                chunked_payload_bytes = sum(
+                    len(text.encode("utf-8"))
+                    + len(json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+                    for text, meta in zip(chunked.documents, chunked.metadatas)
+                )
+
             embedding_size_bytes = self.embedding_provider.calculate_embedding_size_bytes(
                 all_embeddings
             )
+
+            # Payload real en Chroma (documentos + metadata), no el archivo crudo.
+            documents_size_bytes = sum(
+                len(text.encode("utf-8"))
+                + len(json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+                for text, meta in zip(chroma_data.documents, chroma_data.metadatas)
+            )
+
+            # Vectores de chunks: misma dimensión que los principales.
+            dimension = len(all_embeddings[0]) if all_embeddings else 0
+            embedding_chunked_size_bytes = chunked_payload_bytes + chunked_count * dimension * 4
 
             await self.supabase.create_dataset(
                 dataset_id=dataset.dataset_id,
                 user_id=dataset.user_id,
                 filename=dataset.filename,
                 user_token=user_token,
-                # Tamaño del archivo original subido (sin serializar
-                # todo el dataset a JSON solo para medirlo).
-                dataset_size=len(content),
+                # Documentos + metadata tal como quedan en Chroma.
+                dataset_size=documents_size_bytes,
                 embedding_size=embedding_size_bytes,
-                embedding_chunked_size=chunked_count,
+                embedding_chunked_size=embedding_chunked_size_bytes,
                 tipo="chat" if es_chat else "dataset",
             )
 
@@ -448,6 +467,7 @@ class DatasetService:
         user_id: str,
         user_token: str,
     ) -> None:
+        """Borra solo el registro (rápido). Los vectores van en background."""
 
         if not dataset_id:
             raise ValueError(
@@ -462,17 +482,44 @@ class DatasetService:
                 user_token=user_token,
             )
 
-            self.chroma.delete_documents_by_dataset(
-                dataset_id=dataset_id,
-            )
-
-            self.chroma.delete_chunked_by_dataset(
-                dataset_id=dataset_id,
-            )
-
         except Exception as e:
             print(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
             raise
+
+    def delete_dataset_vectors(
+        self,
+        *,
+        dataset_id: str,
+        attempts: int = 3,
+    ) -> None:
+        """Borra vectores en background con verificación y reintentos."""
+
+        where = {"dataset_id": dataset_id}
+
+        for attempt in range(1, attempts + 1):
+            try:
+                self.chroma.delete_documents_by_dataset(
+                    dataset_id=dataset_id,
+                )
+                self.chroma.delete_chunked_by_dataset(
+                    dataset_id=dataset_id,
+                )
+
+                if not self.chroma.has_remaining(where):
+                    print(f"[dataset] Vectores del dataset {dataset_id} eliminados.", flush=True)
+                    return
+
+                print(f"[dataset] Aún quedan vectores del dataset "
+                      f"{dataset_id}, reintentando ({attempt}/{attempts})...", flush=True)
+
+            except Exception as e:
+                print(f"[dataset] Borrado de vectores {dataset_id} "
+                      f"intento {attempt}/{attempts} falló: {e}", flush=True)
+
+            time.sleep(5 * attempt)
+
+        print(f"[dataset] WARNING: quedaron vectores huérfanos "
+              f"del dataset {dataset_id}.", flush=True)
 
     async def delete_datasets_by_user(
         self,
@@ -480,6 +527,7 @@ class DatasetService:
         user_id: str,
         user_token: str,
     ) -> None:
+        """Borra solo los registros (rápido). Los vectores van en background."""
 
         try:
 
@@ -488,14 +536,41 @@ class DatasetService:
                 user_token=user_token,
             )
 
-            self.chroma.delete_documents_by_user(
-                user_id=user_id,
-            )
-
-            self.chroma.delete_chunked_by_user(
-                user_id=user_id,
-            )
-
         except Exception as e:
             print(f"Error deleting datasets for user {user_id}: {e}")
             raise
+
+    def delete_user_vectors(
+        self,
+        *,
+        user_id: str,
+        attempts: int = 3,
+    ) -> None:
+        """Borra vectores en background con verificación y reintentos."""
+
+        where = {"user_id": user_id}
+
+        for attempt in range(1, attempts + 1):
+            try:
+                self.chroma.delete_documents_by_user(
+                    user_id=user_id,
+                )
+                self.chroma.delete_chunked_by_user(
+                    user_id=user_id,
+                )
+
+                if not self.chroma.has_remaining(where):
+                    print(f"[dataset] Vectores del usuario {user_id} eliminados.", flush=True)
+                    return
+
+                print(f"[dataset] Aún quedan vectores del usuario "
+                      f"{user_id}, reintentando ({attempt}/{attempts})...", flush=True)
+
+            except Exception as e:
+                print(f"[dataset] Borrado de vectores {user_id} "
+                      f"intento {attempt}/{attempts} falló: {e}", flush=True)
+
+            time.sleep(5 * attempt)
+
+        print(f"[dataset] WARNING: quedaron vectores huérfanos "
+              f"del usuario {user_id}.", flush=True)
