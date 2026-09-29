@@ -46,28 +46,6 @@ async def login(data: LoginRequest, response: Response):
         }
     }
 
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-@app.post("/auth/register")
-async def registro(data: RegisterRequest):
-    try:
-        response = supabase.auth.sign_up({
-            "email": data.email,
-            "password": data.password,
-        })
-    except Exception as e:
-        raise HTTPException(400, f"No se pudo crear el usuario: {str(e)}")
-
-    if response.user is None:
-        raise HTTPException(400, "No se pudo crear el usuario")
-
-    return {
-        "message": "Usuario registrado exitosamente",
-        "user_id": response.user.id
-    }
-
 def _admin_client():
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(503, "Administración no configurada: falta SUPABASE_SERVICE_ROLE_KEY.")
