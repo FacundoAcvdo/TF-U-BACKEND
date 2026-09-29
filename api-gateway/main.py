@@ -41,6 +41,89 @@ async def login_proxy(request: Request, response: Response):
     return upstream.json()
 
 
+@app.get("/auth/me")
+async def me_proxy(request: Request, user: dict = Depends(verify_jwt)):
+    async with httpx.AsyncClient(timeout=None) as client:
+        upstream = await client.get(
+            os.getenv("AUTH_SERVICE_URL") + "/auth/me",
+            headers={
+                "X-User-Token": user["raw_token"],
+                "X-User-ID": user["sub"],
+            },
+        )
+    return upstream.json()
+
+
+@app.post("/auth/logout")
+async def logout_proxy(request: Request, response: Response, user: dict = Depends(verify_jwt)):
+    async with httpx.AsyncClient(timeout=None) as client:
+        upstream = await client.post(
+            os.getenv("AUTH_SERVICE_URL") + "/auth/logout",
+            headers={
+                "X-User-Token": user["raw_token"],
+                "X-User-ID": user["sub"],
+            },
+        )
+
+    for cookie_header in upstream.headers.get_list("set-cookie"):
+        response.headers.append("set-cookie", cookie_header)
+
+    return upstream.json()
+
+
+def _auth_headers(user: dict) -> dict:
+    return {
+        "X-User-Token": user["raw_token"],
+        "X-User-ID": user["sub"],
+    }
+
+
+async def _proxy_auth(request: Request, method: str, path: str, user: dict) -> Response:
+    body = await request.body()
+    headers = _auth_headers(user)
+    if request.headers.get("content-type"):
+        headers["Content-Type"] = request.headers["content-type"]
+    async with httpx.AsyncClient(timeout=None) as client:
+        upstream = await client.request(
+            method=method,
+            url=os.getenv("AUTH_SERVICE_URL") + path,
+            headers=headers,
+            content=body if method in ["POST", "PUT", "PATCH", "DELETE"] else None,
+            params=dict(request.query_params),
+        )
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=dict(upstream.headers),
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+@app.get("/auth/admin/users")
+async def admin_users_list_proxy(request: Request, user: dict = Depends(verify_jwt)):
+    return await _proxy_auth(request, "GET", "/auth/admin/users", user)
+
+
+@app.post("/auth/admin/users")
+async def admin_users_create_proxy(request: Request, user: dict = Depends(verify_jwt)):
+    return await _proxy_auth(request, "POST", "/auth/admin/users", user)
+
+
+@app.patch("/auth/admin/users/{user_id}/role")
+async def admin_users_role_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+    return await _proxy_auth(request, "PATCH", f"/auth/admin/users/{user_id}/role", user)
+
+
+@app.patch("/auth/admin/users/{user_id}/password")
+async def admin_users_password_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+    return await _proxy_auth(request, "PATCH", f"/auth/admin/users/{user_id}/password", user)
+
+
+@app.delete("/auth/admin/users/{user_id}")
+async def admin_users_delete_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+    return await _proxy_auth(request, "DELETE", f"/auth/admin/users/{user_id}", user)
+
+
 @app.api_route("/{service}/{operation}", methods=["GET", "POST", "PUT", "DELETE"])
 async def gateway(service: str, operation: str, request: Request, user: dict = Depends(verify_jwt)):
     if service not in SERVICES:
