@@ -1,6 +1,5 @@
 import os
 import re
-import asyncio
 from collections import Counter
 from typing import Literal, Optional
 
@@ -65,24 +64,9 @@ def get_supabase_client(user_jwt: str):
     return client
 
 
-CHROMA_HOST = os.environ.get("CHROMA_HOST", "chroma-service")
-CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
-CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "documents")
-CHROMA_PAGE_SIZE = int(os.environ.get("CHROMA_PAGE_SIZE", "2000"))
-
-_chroma_client = None
-_chroma_collection = None
-
-
 def get_chroma_collection():
-    """Singleton: no crear HttpClient por request."""
-    global _chroma_client, _chroma_collection
-    if _chroma_collection is not None:
-        return _chroma_collection
-    if _chroma_client is None:
-        _chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-    _chroma_collection = _chroma_client.get_collection(name=CHROMA_COLLECTION)
-    return _chroma_collection
+    client = chromadb.HttpClient(host="chroma-service", port=8000)
+    return client.get_collection(name="documents")
 
 
 def obtener_resultados_paginados(
@@ -91,19 +75,20 @@ def obtener_resultados_paginados(
     include_fields: list,
     limite_por_pagina: int = 10000
 ) -> dict:
-    """Paginado robusto: `ids` como conteo canónico (no include_fields[0])."""
     resultados_acumulados = {campo: [] for campo in include_fields}
-    resultados_acumulados["ids"] = []
     offset = 0
+    hay_mas_resultados = True
 
-    while True:
-        pagina = _obtener_pagina_sync(
-            collection, where_filter, include_fields, limite_por_pagina, offset
+    while hay_mas_resultados:
+        pagina = collection.get(
+            where=where_filter,
+            include=include_fields,
+            limit=limite_por_pagina,
+            offset=offset,
         )
 
-        ids = pagina.get("ids") or []
-        if not ids:
-            break
+        campo_base = include_fields[0]
+        datos_pagina = pagina.get(campo_base) or []
 
         if not datos_pagina:
             hay_mas_resultados = False
@@ -118,22 +103,6 @@ def obtener_resultados_paginados(
                 offset += limite_por_pagina
 
     return resultados_acumulados
-
-
-async def obtener_resultados_paginados(
-    collection,
-    where_filter: dict,
-    include_fields: list,
-    limite_por_pagina: int = CHROMA_PAGE_SIZE,
-) -> dict:
-    """Wrapper async: el HttpClient de Chroma es bloqueante → to_thread."""
-    return await asyncio.to_thread(
-        obtener_resultados_paginados_sync,
-        collection,
-        where_filter,
-        include_fields,
-        limite_por_pagina,
-    )
 
 def tokenizar(texto: str) -> list[str]:
     texto = URL_RE.sub(" ", texto.lower())
@@ -304,7 +273,7 @@ async def obtener_usuarios(
 
         response = (
             supabase.table("datasets")
-            .select("dataset_id")
+            .select("*")
             .eq("dataset_name", data.dataset)
             .eq("user_id", x_user_id)
             .execute()
@@ -326,7 +295,7 @@ async def obtener_usuarios(
                 {"dataset_id": dataset_id},
             ]
         }
-        resultados_totales = await obtener_resultados_paginados(collection, filtros, ["metadatas"])
+        resultados_totales = obtener_resultados_paginados(collection, filtros, ["metadatas"])
         metadatas = resultados_totales.get("metadatas", [])
 
         if not metadatas:
@@ -389,7 +358,7 @@ async def evolucion_palabras(
 
         response = (
             supabase.table("datasets")
-            .select("dataset_id")
+            .select("*")
             .eq("dataset_name", data.dataset)
             .eq("user_id", x_user_id)
             .execute()
@@ -458,7 +427,8 @@ async def evolucion_palabras(
                 detail="Algunos mensajes no tienen fecha registrada. No se puede armar la línea de tiempo.",
             )
 
-        cache = buscar_cache(supabase, x_user_id, dataset_id, data.remitente, modo, top_k, len(documentos))
+        cache = buscar_cache(supabase, x_user_id, dataset_id, data.remitente,
+                             modo, top_k, len(documentos))
         if cache is not None:
             cache["desde_cache"] = True
             return cache
@@ -469,7 +439,8 @@ async def evolucion_palabras(
             resultado = evolucion_por_bloques(documentos, metadatas, top_k, data)
 
         resultado["desde_cache"] = False
-        guardar_cache(supabase, x_user_id, dataset_id, data.remitente,modo, top_k, len(documentos), resultado)
+        guardar_cache(supabase, x_user_id, dataset_id, data.remitente,
+                      modo, top_k, len(documentos), resultado)
         return resultado
 
     except HTTPException:
