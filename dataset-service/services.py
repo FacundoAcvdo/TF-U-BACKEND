@@ -264,7 +264,7 @@ class DatasetService:
         texts: list[str] = []
         metadatas: list[dict[str, Any]] = []
 
-        for document in documents:
+        for indice, document in enumerate(documents):
             document_id = str(uuid.uuid4())
             raw_meta = document.to_chroma_metadata()
 
@@ -292,6 +292,8 @@ class DatasetService:
                     clean_meta[k] = v
                 else:
                     clean_meta[k] = str(v)
+
+            clean_meta["id"] = indice
 
             ids.append(document_id)
             texts.append(document.texto)

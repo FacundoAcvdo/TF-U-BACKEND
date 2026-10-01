@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 from collections import Counter
-from typing import Optional
+from typing import Literal, Optional
 
 import chromadb
 import pandas as pd
@@ -30,8 +30,8 @@ PALABRAS_IGNORADAS_MEDIA = {
     "multimedia", "omitido", "omitida", "audio", "imagen", "video", "sticker",
     "gif", "documento", "contacto", "ubicación", "mensaje", "eliminado",
     "eliminaste", "editado", "llamada", "perdida", "archivo", "adjunto",
-    "omitted", "image", "video", "sticker", "gif", "document", "contact", 
-    "location", "message", "deleted", "edited", "voice", "call", "missed", 
+    "omitted", "image", "video", "sticker", "gif", "document", "contact",
+    "location", "message", "deleted", "edited", "voice", "call", "missed",
     "attachment", "null", "media"
 }
 
@@ -40,6 +40,12 @@ REMITENTES_SISTEMA = {
     "system",
     "whatsapp",
 }
+
+USUARIO_GENERICO = "Usuario 1"
+
+TABLA_CACHE = "evolucion_resultados"
+
+OBJETIVO_BLOQUES = 10
 
 app = FastAPI()
 
@@ -79,20 +85,11 @@ def get_chroma_collection():
     return _chroma_collection
 
 
-def _obtener_pagina_sync(collection, where_filter: dict, include_fields: list, limit: int, offset: int) -> dict:
-    return collection.get(
-        where=where_filter,
-        include=include_fields,
-        limit=limit,
-        offset=offset,
-    )
-
-
-def obtener_resultados_paginados_sync(
+def obtener_resultados_paginados(
     collection,
     where_filter: dict,
     include_fields: list,
-    limite_por_pagina: int = CHROMA_PAGE_SIZE,
+    limite_por_pagina: int = 10000
 ) -> dict:
     """Paginado robusto: `ids` como conteo canónico (no include_fields[0])."""
     resultados_acumulados = {campo: [] for campo in include_fields}
@@ -108,13 +105,17 @@ def obtener_resultados_paginados_sync(
         if not ids:
             break
 
-        resultados_acumulados["ids"].extend(ids)
-        for campo in include_fields:
-            resultados_acumulados[campo].extend(pagina.get(campo) or [])
+        if not datos_pagina:
+            hay_mas_resultados = False
+        else:
+            for campo in include_fields:
+                if pagina.get(campo):
+                    resultados_acumulados[campo].extend(pagina[campo])
 
-        offset += len(ids)
-        if len(ids) < limite_por_pagina:
-            break
+            if len(datos_pagina) < limite_por_pagina:
+                hay_mas_resultados = False
+            else:
+                offset += limite_por_pagina
 
     return resultados_acumulados
 
@@ -144,10 +145,14 @@ def tokenizar(texto: str) -> list[str]:
     ]
 
 
+def contar_palabras(texto: str) -> int:
+    return len((texto or "").split())
+
+
 def particionar_por_fecha(
     df: pd.DataFrame,
 ) -> tuple[pd.core.groupby.generic.DataFrameGroupBy, str]:
-    
+
     fecha_min, fecha_max = df["fecha"].min(), df["fecha"].max()
     dias_totales = (fecha_max - fecha_min).days
 
@@ -188,6 +193,41 @@ def etiquetar_periodo(periodo: pd.Period, granularidad: str) -> str:
     return str(periodo.year)
 
 
+def clave_orden(meta: dict) -> tuple[int, int]:
+    try:
+        return (0, int((meta or {}).get("id")))
+    except (TypeError, ValueError):
+        return (1, 0)
+
+
+def particionar_por_bloques(
+    textos_ordenados: list[str],
+    objetivo_bloques: int = OBJETIVO_BLOQUES,
+) -> list[tuple[int, int, list[str]]]:
+    total_palabras = sum(contar_palabras(t) for t in textos_ordenados)
+    n = len(textos_ordenados)
+    if n == 0:
+        return []
+
+    palabras_por_bloque = max(1, total_palabras // objetivo_bloques)
+
+    bloques: list[tuple[int, int, list[str]]] = []
+    actual: list[str] = []
+    actual_palabras = 0
+    inicio = 0
+    for i, texto in enumerate(textos_ordenados):
+        actual.append(texto)
+        actual_palabras += contar_palabras(texto)
+        if actual_palabras >= palabras_por_bloque and i < n - 1:
+            bloques.append((inicio, i, actual))
+            actual = []
+            actual_palabras = 0
+            inicio = i + 1
+    if actual:
+        bloques.append((inicio, n - 1, actual))
+    return bloques
+
+
 def palabras_significativas(mensajes: list[str], top_k: int) -> list[dict]:
     contador = Counter()
 
@@ -200,6 +240,48 @@ def palabras_significativas(mensajes: list[str], top_k: int) -> list[dict]:
     ]
 
 
+def buscar_cache(supabase, x_user_id: str, dataset_id: str, remitente: str,
+                 modo: str, top_k: int, cantidad: int):
+    try:
+        respuesta = (
+            supabase.table(TABLA_CACHE)
+            .select("*")
+            .eq("user_id", x_user_id)
+            .eq("dataset_id", dataset_id)
+            .eq("remitente", remitente)
+            .eq("modo", modo)
+            .eq("top_k", top_k)
+            .limit(1)
+            .execute()
+        )
+        if respuesta.data:
+            fila = respuesta.data[0]
+            if int(fila.get("cantidad_mensajes", -1)) == cantidad:
+                return fila.get("payload")
+    except Exception as e:
+        print(f"Aviso: no se pudo leer el caché de evolución: {str(e)}")
+    return None
+
+
+def guardar_cache(supabase, x_user_id: str, dataset_id: str, remitente: str,
+                  modo: str, top_k: int, cantidad: int, payload: dict):
+    try:
+        supabase.table(TABLA_CACHE).upsert(
+            {
+                "user_id": x_user_id,
+                "dataset_id": dataset_id,
+                "remitente": remitente,
+                "modo": modo,
+                "top_k": top_k,
+                "cantidad_mensajes": cantidad,
+                "payload": payload,
+            },
+            on_conflict="user_id,dataset_id,remitente,modo,top_k",
+        ).execute()
+    except Exception as e:
+        print(f"Aviso: no se pudo guardar el caché de evolución: {str(e)}")
+
+
 class UsuariosRequest(BaseModel):
     dataset: str
 
@@ -208,6 +290,7 @@ class EvolucionPalabrasRequest(BaseModel):
     dataset: str
     remitente: str
     top_k: Optional[int] = 10
+    modo: Literal["auto", "fecha", "bloques"] = "auto"
 
 
 @app.post("/users")
@@ -252,12 +335,18 @@ async def obtener_usuarios(
                 detail="No se encontraron mensajes para este dataset.",
             )
 
-        remitentes_raw = [
-            meta.get("remitente")
-            for meta in metadatas
-            if meta.get("remitente")
-            and not meta.get("remitente").strip().lower() in REMITENTES_SISTEMA
-        ]
+        hay_fechas = any(meta.get("fecha") for meta in metadatas)
+
+        remitentes_raw = []
+        for meta in metadatas:
+            nombre = (meta.get("remitente") or "").strip()
+            if not nombre:
+                if hay_fechas:
+                    continue
+                nombre = USUARIO_GENERICO
+            if nombre.strip().lower() in REMITENTES_SISTEMA:
+                continue
+            remitentes_raw.append(nombre)
 
         if not remitentes_raw:
             raise HTTPException(
@@ -316,17 +405,35 @@ async def evolucion_palabras(
 
         collection = get_chroma_collection()
 
-        filtros = {
-            "$and": [
-                {"user_id": x_user_id},
-                {"dataset_id": dataset_id},
-                {"remitente": data.remitente},
-            ]
-        }
-        resultados_totales = await obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
-        
+        es_generico = data.remitente == USUARIO_GENERICO
+        if es_generico:
+            filtros = {
+                "$and": [
+                    {"user_id": x_user_id},
+                    {"dataset_id": dataset_id},
+                ]
+            }
+        else:
+            filtros = {
+                "$and": [
+                    {"user_id": x_user_id},
+                    {"dataset_id": dataset_id},
+                    {"remitente": data.remitente},
+                ]
+            }
+        resultados_totales = obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
+
         documentos = resultados_totales.get("documents", [])
         metadatas = resultados_totales.get("metadatas", [])
+
+        if es_generico:
+            pares = [
+                (doc, meta) for doc, meta in zip(documentos, metadatas)
+                if not (meta.get("remitente") or "").strip()
+            ]
+            if pares:
+                documentos = [doc for doc, _ in pares]
+                metadatas = [meta for _, meta in pares]
 
         if not documentos:
             raise HTTPException(
@@ -334,65 +441,36 @@ async def evolucion_palabras(
                 detail=f"No se encontraron mensajes de '{data.remitente}' en este dataset.",
             )
 
-        fechas_raw = [meta.get("fecha") for meta in metadatas]
+        top_k = max(1, min(data.top_k or 10, 30))
 
-        if any(f is None for f in fechas_raw):
+        fechas_raw = [meta.get("fecha") for meta in metadatas]
+        tiene_fechas = all(f is not None for f in fechas_raw)
+
+        modo_pedido = data.modo or "auto"
+        if modo_pedido == "auto":
+            modo = "fecha" if tiene_fechas else "bloques"
+        else:
+            modo = modo_pedido
+
+        if modo == "fecha" and not tiene_fechas:
             raise HTTPException(
                 status_code=422,
                 detail="Algunos mensajes no tienen fecha registrada. No se puede armar la línea de tiempo.",
             )
 
-        df = pd.DataFrame(
-            {
-                "texto": documentos,
-                "fecha": pd.to_datetime(fechas_raw),
-            }
-        ).sort_values("fecha")
+        cache = buscar_cache(supabase, x_user_id, dataset_id, data.remitente, modo, top_k, len(documentos))
+        if cache is not None:
+            cache["desde_cache"] = True
+            return cache
 
-        grupos_por_periodo, granularidad = particionar_por_fecha(df)
+        if modo == "fecha":
+            resultado = evolucion_por_fecha(documentos, fechas_raw, top_k, data)
+        else:
+            resultado = evolucion_por_bloques(documentos, metadatas, top_k, data)
 
-        top_k = max(1, min(data.top_k or 10, 30))
-
-        periodos_respuesta = []
-
-        for periodo, grupo in grupos_por_periodo:
-            palabras_top = palabras_significativas(
-                grupo["texto"].tolist(),
-                top_k,
-            )
-
-            if not palabras_top:
-                continue
-
-            periodos_respuesta.append(
-                {
-                    "etiqueta": etiquetar_periodo(
-                        periodo,
-                        granularidad,
-                    ),
-                    "fecha_inicio": periodo.start_time.strftime("%Y-%m-%d"),
-                    "fecha_fin": periodo.end_time.strftime("%Y-%m-%d"),
-                    "cantidad_mensajes": int(len(grupo)),
-                    "palabras_top": palabras_top,
-                }
-            )
-
-        if not periodos_respuesta:
-            raise HTTPException(
-                status_code=422,
-                detail="No quedaron palabras significativas tras limpiar el texto de este remitente.",
-            )
-
-        return {
-            "remitente": data.remitente,
-            "granularidad": granularidad,
-            "rango_fechas": {
-                "desde": df["fecha"].min().strftime("%Y-%m-%d"),
-                "hasta": df["fecha"].max().strftime("%Y-%m-%d"),
-            },
-            "total_mensajes": int(len(df)),
-            "periodos": periodos_respuesta,
-        }
+        resultado["desde_cache"] = False
+        guardar_cache(supabase, x_user_id, dataset_id, data.remitente,modo, top_k, len(documentos), resultado)
+        return resultado
 
     except HTTPException:
         raise
@@ -402,3 +480,101 @@ async def evolucion_palabras(
             status_code=500,
             detail=str(e),
         )
+
+
+def evolucion_por_fecha(documentos: list[str], fechas_raw: list,
+                        top_k: int, data: EvolucionPalabrasRequest) -> dict:
+    df = pd.DataFrame(
+        {
+            "texto": documentos,
+            "fecha": pd.to_datetime(fechas_raw),
+        }
+    ).sort_values("fecha")
+
+    grupos_por_periodo, granularidad = particionar_por_fecha(df)
+
+    periodos_respuesta = []
+
+    for periodo, grupo in grupos_por_periodo:
+        palabras_top = palabras_significativas(
+            grupo["texto"].tolist(),
+            top_k,
+        )
+
+        if not palabras_top:
+            continue
+
+        periodos_respuesta.append(
+            {
+                "etiqueta": etiquetar_periodo(
+                    periodo,
+                    granularidad,
+                ),
+                "fecha_inicio": periodo.start_time.strftime("%Y-%m-%d"),
+                "fecha_fin": periodo.end_time.strftime("%Y-%m-%d"),
+                "cantidad_mensajes": int(len(grupo)),
+                "palabras_top": palabras_top,
+            }
+        )
+
+    if not periodos_respuesta:
+        raise HTTPException(
+            status_code=422,
+            detail="No quedaron palabras significativas tras limpiar el texto de este remitente.",
+        )
+
+    return {
+        "remitente": data.remitente,
+        "modo_usado": "fecha",
+        "granularidad": granularidad,
+        "rango_fechas": {
+            "desde": df["fecha"].min().strftime("%Y-%m-%d"),
+            "hasta": df["fecha"].max().strftime("%Y-%m-%d"),
+        },
+        "total_mensajes": int(len(df)),
+        "periodos": periodos_respuesta,
+    }
+
+
+def evolucion_por_bloques(documentos: list[str], metadatas: list,
+                          top_k: int, data: EvolucionPalabrasRequest) -> dict:
+    pares = list(zip(documentos, metadatas))
+    pares.sort(key=lambda p: clave_orden(p[1]))
+    orden_estimado = any(clave_orden(meta)[0] == 1 for _, meta in pares)
+    textos_ordenados = [doc for doc, _ in pares]
+
+    bloques = particionar_por_bloques(textos_ordenados)
+    total_palabras = sum(contar_palabras(t) for t in textos_ordenados)
+
+    bloques_respuesta = []
+    for i, (inicio, fin, textos) in enumerate(bloques, start=1):
+        palabras_top = palabras_significativas(textos, top_k)
+        if not palabras_top:
+            continue
+        bloques_respuesta.append(
+            {
+                "etiqueta": f"Bloque {i} · msgs {inicio + 1}–{fin + 1}",
+                "desde_msg": inicio + 1,
+                "hasta_msg": fin + 1,
+                "cantidad_mensajes": int(len(textos)),
+                "cantidad_palabras": int(sum(contar_palabras(t) for t in textos)),
+                "palabras_top": palabras_top,
+            }
+        )
+
+    if not bloques_respuesta:
+        raise HTTPException(
+            status_code=422,
+            detail="No quedaron palabras significativas tras limpiar el texto de este remitente.",
+        )
+
+    return {
+        "remitente": data.remitente,
+        "modo_usado": "bloques",
+        "granularidad": "bloques",
+        "orden_estimado": orden_estimado,
+        "total_mensajes": int(len(textos_ordenados)),
+        "total_palabras": int(total_palabras),
+        "cantidad_bloques": int(len(bloques_respuesta)),
+        "bloques": bloques_respuesta,
+    }
