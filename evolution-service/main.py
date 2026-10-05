@@ -12,6 +12,8 @@ from supabase import create_client
 import nltk
 from nltk.corpus import stopwords
 
+from emotions import EMOTIONS, predecir_emociones_textos, promediar_emociones
+
 try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
@@ -209,6 +211,15 @@ def palabras_significativas(mensajes: list[str], top_k: int) -> list[dict]:
     ]
 
 
+def evaluar_emociones(mensajes: list[str]) -> dict:
+    textos = [(m or "").strip() for m in (mensajes or [])]
+    textos = [t for t in textos if t]
+    if not textos:
+        return {emo: 0.0 for emo in EMOTIONS}
+    scores = predecir_emociones_textos(textos, categories=EMOTIONS)
+    return promediar_emociones(scores, categories=EMOTIONS)
+
+
 def buscar_cache(supabase, x_user_id: str, dataset_id: str, remitente: str,
                  modo: str, top_k: int, cantidad: int):
     try:
@@ -259,6 +270,11 @@ class EvolucionPalabrasRequest(BaseModel):
     dataset: str
     remitente: str
     top_k: Optional[int] = 10
+    modo: Literal["auto", "fecha", "bloques"] = "auto"
+
+class EvolucionEmocionesRequest(BaseModel):
+    dataset: str
+    remitente: str
     modo: Literal["auto", "fecha", "bloques"] = "auto"
 
 
@@ -549,3 +565,205 @@ def evolucion_por_bloques(documentos: list[str], metadatas: list,
         "cantidad_bloques": int(len(bloques_respuesta)),
         "bloques": bloques_respuesta,
     }
+
+@app.post("/emotions-evolution")
+async def evolucion_palabras(
+    data: EvolucionEmocionesRequest,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    try:
+        supabase = get_supabase_client(x_user_token)
+
+        response = (
+            supabase.table("datasets")
+            .select("*")
+            .eq("dataset_name", data.dataset)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+
+        if not response.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Dataset '{data.dataset}' no encontrado o sin permisos.",
+            )
+
+        dataset_id = response.data[0].get("dataset_id")
+
+        collection = get_chroma_collection()
+
+        es_generico = data.remitente == USUARIO_GENERICO
+        if es_generico:
+            filtros = {
+                "$and": [
+                    {"user_id": x_user_id},
+                    {"dataset_id": dataset_id},
+                ]
+            }
+        else:
+            filtros = {
+                "$and": [
+                    {"user_id": x_user_id},
+                    {"dataset_id": dataset_id},
+                    {"remitente": data.remitente},
+                ]
+            }
+        resultados_totales = obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
+
+        documentos = resultados_totales.get("documents", [])
+        metadatas = resultados_totales.get("metadatas", [])
+
+        if es_generico:
+            pares = [
+                (doc, meta) for doc, meta in zip(documentos, metadatas)
+                if not (meta.get("remitente") or "").strip()
+            ]
+            if pares:
+                documentos = [doc for doc, _ in pares]
+                metadatas = [meta for _, meta in pares]
+
+        if not documentos:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontraron mensajes de '{data.remitente}' en este dataset.",
+            )
+
+        fechas_raw = [meta.get("fecha") for meta in metadatas]
+        tiene_fechas = all(f is not None for f in fechas_raw)
+
+        modo_pedido = data.modo or "auto"
+        if modo_pedido == "auto":
+            modo = "fecha" if tiene_fechas else "bloques"
+        else:
+            modo = modo_pedido
+
+        if modo == "fecha" and not tiene_fechas:
+            raise HTTPException(
+                status_code=422,
+                detail="Algunos mensajes no tienen fecha registrada. No se puede armar la línea de tiempo.",
+            )
+
+        # TODO: Implementar la busqueda por cache para la evolución de emociones, similar a la de palabras.
+        cache = buscar_cache_emociones(supabase, x_user_id, dataset_id, data.remitente, modo, len(documentos))
+        
+        if cache is not None:
+            cache["desde_cache"] = True
+            return cache
+
+        if modo == "fecha":
+            resultado = evolucion_emociones_por_fecha(documentos, fechas_raw, data)
+        else:
+            resultado = evolucion_emociones_por_bloques(documentos, metadatas, data)
+
+        resultado["desde_cache"] = False
+
+        #TODO: Implementar la función guardar_cache para la evolución de emociones, similar a la de palabras.
+        guardar_cache_emociones(supabase, x_user_id, dataset_id, data.remitente, modo, len(documentos), resultado)
+        return resultado
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error al calcular evolución de emociones: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
+
+def buscar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente: str, modo: str, cantidad: int):
+    return None  
+
+def evolucion_emociones_por_fecha(documentos: list[str], fechas_raw: list, data: EvolucionEmocionesRequest) -> dict:
+    df = pd.DataFrame(
+        {
+            "texto": documentos,
+            "fecha": pd.to_datetime(fechas_raw),
+        }
+    ).sort_values("fecha")
+
+    grupos_por_periodo, granularidad = particionar_por_fecha(df)
+
+    periodos_respuesta = []
+
+    for periodo, grupo in grupos_por_periodo:
+        textos = grupo["texto"].tolist()
+        if not textos:
+            continue
+
+        periodos_respuesta.append(
+            {
+                "etiqueta": etiquetar_periodo(
+                    periodo,
+                    granularidad,
+                ),
+                "fecha_inicio": periodo.start_time.strftime("%Y-%m-%d"),
+                "fecha_fin": periodo.end_time.strftime("%Y-%m-%d"),
+                "cantidad_mensajes": int(len(grupo)),
+                "emotions": evaluar_emociones(textos),
+            }
+        )
+
+    if not periodos_respuesta:
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudieron evaluar emociones en los periodos de este remitente.",
+        )
+
+    return {
+        "remitente": data.remitente,
+        "modo_usado": "fecha",
+        "granularidad": granularidad,
+        "emotions": EMOTIONS,
+        "rango_fechas": {
+            "desde": df["fecha"].min().strftime("%Y-%m-%d"),
+            "hasta": df["fecha"].max().strftime("%Y-%m-%d"),
+        },
+        "total_mensajes": int(len(df)),
+        "periodos": periodos_respuesta,
+    }
+
+def evolucion_emociones_por_bloques(documentos: list[str], metadatas: list, data: EvolucionEmocionesRequest) -> dict:
+    pares = list(zip(documentos, metadatas))
+    pares.sort(key=lambda p: clave_orden(p[1]))
+    orden_estimado = any(clave_orden(meta)[0] == 1 for _, meta in pares)
+    textos_ordenados = [doc for doc, _ in pares]
+
+    bloques = particionar_por_bloques(textos_ordenados)
+    total_palabras = sum(contar_palabras(t) for t in textos_ordenados)
+
+    bloques_respuesta = []
+    for i, (inicio, fin, textos) in enumerate(bloques, start=1):
+        if not textos:
+            continue
+        bloques_respuesta.append(
+            {
+                "etiqueta": f"Bloque {i} · msgs {inicio + 1}–{fin + 1}",
+                "desde_msg": inicio + 1,
+                "hasta_msg": fin + 1,
+                "cantidad_mensajes": int(len(textos)),
+                "cantidad_palabras": int(sum(contar_palabras(t) for t in textos)),
+                "emotions": evaluar_emociones(textos),
+            }
+        )
+
+    if not bloques_respuesta:
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudieron evaluar emociones en los bloques de este remitente.",
+        )
+
+    return {
+        "remitente": data.remitente,
+        "modo_usado": "bloques",
+        "granularidad": "bloques",
+        "emotions": EMOTIONS,
+        "orden_estimado": orden_estimado,
+        "total_mensajes": int(len(textos_ordenados)),
+        "total_palabras": int(total_palabras),
+        "cantidad_bloques": int(len(bloques_respuesta)),
+        "bloques": bloques_respuesta,
+    }
+
+def guardar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente: str, modo: str, cantidad: int, payload: dict):
+    pass
