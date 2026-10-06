@@ -1,3 +1,8 @@
 .env*
 .dockerignore
 venv/
+.venv/
+__pycache__/
+*.pyc
+risk-service/es_data/
+risk-service/.venv/
