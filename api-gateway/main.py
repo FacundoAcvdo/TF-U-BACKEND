@@ -26,6 +26,7 @@ SERVICES = {
     "datacleaning": os.getenv("DATA_CLEANING_SERVICE_URL"),
     "evolution": os.getenv("EVOLUTION_SERVICE_URL"),
     "suicide": os.getenv("SUICIDE_SERVICE_URL"),
+    "report": os.getenv("REPORT_SERVICE_URL"),
 }
 
 @app.post("/auth/login")

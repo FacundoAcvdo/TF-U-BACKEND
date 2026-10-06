@@ -44,6 +44,7 @@ REMITENTES_SISTEMA = {
 
 USUARIO_GENERICO = "Usuario 1"
 
+<<<<<<< HEAD
 # Chroma guarda el autor como "autor" (dataset-service/models.py),
 # pero el front / datasets viejos usan "remitente". Se aceptan ambos.
 def obtener_autor(meta: dict) -> str:
@@ -60,6 +61,9 @@ def filtro_por_remitente(x_user_id: str, dataset_id: str, remitente: str) -> dic
     }
 
 TABLA_CACHE = "evolucion_resultados"
+=======
+TABLA_CACHE = "evolution_results"
+>>>>>>> 64520d0 (feat: add report generation service with inventory and data visualization)
 
 TABLA_CACHE_EMOCIONES = "emotions_evolution_results"
 
