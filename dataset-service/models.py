@@ -11,6 +11,8 @@ class Document:
 
     fecha: str | None = None
 
+    autor: str | None = None
+
     metadata: dict[str, Any] = field(
         default_factory=dict
     )
@@ -25,6 +27,9 @@ class Document:
 
         if self.fecha is not None:
             result["fecha"] = str(self.fecha)
+
+        if self.autor is not None:
+            result["autor"] = str(self.autor)
 
         for key, value in self.metadata.items():
             if value is None:

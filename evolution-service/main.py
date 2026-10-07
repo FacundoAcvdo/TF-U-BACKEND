@@ -44,7 +44,24 @@ REMITENTES_SISTEMA = {
 
 USUARIO_GENERICO = "Usuario 1"
 
+# Chroma guarda el autor como "autor" (dataset-service/models.py),
+# pero el front / datasets viejos usan "remitente". Se aceptan ambos.
+def obtener_autor(meta: dict) -> str:
+    return ((meta or {}).get("remitente") or (meta or {}).get("autor") or "").strip()
+
+
+def filtro_por_remitente(x_user_id: str, dataset_id: str, remitente: str) -> dict:
+    return {
+        "$and": [
+            {"user_id": x_user_id},
+            {"dataset_id": dataset_id},
+            {"$or": [{"remitente": remitente}, {"autor": remitente}]},
+        ]
+    }
+
 TABLA_CACHE = "evolucion_resultados"
+
+TABLA_CACHE_EMOCIONES = "emotions_evolution_results"
 
 OBJETIVO_BLOQUES = 10
 
@@ -324,7 +341,7 @@ async def obtener_usuarios(
 
         remitentes_raw = []
         for meta in metadatas:
-            nombre = (meta.get("remitente") or "").strip()
+            nombre = obtener_autor(meta)
             if not nombre:
                 if hay_fechas:
                     continue
@@ -399,13 +416,7 @@ async def evolucion_palabras(
                 ]
             }
         else:
-            filtros = {
-                "$and": [
-                    {"user_id": x_user_id},
-                    {"dataset_id": dataset_id},
-                    {"remitente": data.remitente},
-                ]
-            }
+            filtros = filtro_por_remitente(x_user_id, dataset_id, data.remitente)
         resultados_totales = obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
 
         documentos = resultados_totales.get("documents", [])
@@ -414,7 +425,7 @@ async def evolucion_palabras(
         if es_generico:
             pares = [
                 (doc, meta) for doc, meta in zip(documentos, metadatas)
-                if not (meta.get("remitente") or "").strip()
+                if not obtener_autor(meta)
             ]
             if pares:
                 documentos = [doc for doc, _ in pares]
@@ -602,13 +613,7 @@ async def evolucion_palabras(
                 ]
             }
         else:
-            filtros = {
-                "$and": [
-                    {"user_id": x_user_id},
-                    {"dataset_id": dataset_id},
-                    {"remitente": data.remitente},
-                ]
-            }
+            filtros = filtro_por_remitente(x_user_id, dataset_id, data.remitente)
         resultados_totales = obtener_resultados_paginados(collection, filtros, ["documents", "metadatas"])
 
         documentos = resultados_totales.get("documents", [])
@@ -617,7 +622,7 @@ async def evolucion_palabras(
         if es_generico:
             pares = [
                 (doc, meta) for doc, meta in zip(documentos, metadatas)
-                if not (meta.get("remitente") or "").strip()
+                if not obtener_autor(meta)
             ]
             if pares:
                 documentos = [doc for doc, _ in pares]
@@ -644,7 +649,6 @@ async def evolucion_palabras(
                 detail="Algunos mensajes no tienen fecha registrada. No se puede armar la línea de tiempo.",
             )
 
-        # TODO: Implementar la busqueda por cache para la evolución de emociones, similar a la de palabras.
         cache = buscar_cache_emociones(supabase, x_user_id, dataset_id, data.remitente, modo, len(documentos))
         
         if cache is not None:
@@ -658,7 +662,6 @@ async def evolucion_palabras(
 
         resultado["desde_cache"] = False
 
-        #TODO: Implementar la función guardar_cache para la evolución de emociones, similar a la de palabras.
         guardar_cache_emociones(supabase, x_user_id, dataset_id, data.remitente, modo, len(documentos), resultado)
         return resultado
 
@@ -672,6 +675,23 @@ async def evolucion_palabras(
         )
 
 def buscar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente: str, modo: str, cantidad: int):
+    try:
+        respuesta = (
+            supabase.table(TABLA_CACHE_EMOCIONES)
+            .select("*")
+            .eq("user_id", x_user_id)
+            .eq("dataset_id", dataset_id)
+            .eq("remitente", remitente)
+            .eq("modo", modo)
+            .limit(1)
+            .execute()
+        )
+        if respuesta.data:
+            fila = respuesta.data[0]
+            if int(fila.get("cantidad_mensajes", -1)) == cantidad:
+                return fila.get("payload")
+    except Exception as e:
+        print(f"Aviso: no se pudo leer el caché de evolución de emociones: {str(e)}")
     return None  
 
 def evolucion_emociones_por_fecha(documentos: list[str], fechas_raw: list, data: EvolucionEmocionesRequest) -> dict:
@@ -766,4 +786,17 @@ def evolucion_emociones_por_bloques(documentos: list[str], metadatas: list, data
     }
 
 def guardar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente: str, modo: str, cantidad: int, payload: dict):
-    pass
+    try:
+        supabase.table(TABLA_CACHE_EMOCIONES).upsert(
+            {
+                "user_id": x_user_id,
+                "dataset_id": dataset_id,
+                "remitente": remitente,
+                "modo": modo,
+                "cantidad_mensajes": cantidad,
+                "payload": payload,
+            },
+            on_conflict="dataset_id,user_id,remitente,modo",
+        ).execute()
+    except Exception as e:
+        print(f"Aviso: no se pudo guardar el caché de evolución de emociones: {str(e)}")

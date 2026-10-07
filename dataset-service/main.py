@@ -125,6 +125,10 @@ async def create_dataset(
         default=None
     ),
 
+    columnaUsuario: str | None = Form(
+        default=None
+    ),
+
     formatoOriginal: str | None = Form(
         default=None
     ),
@@ -243,6 +247,7 @@ async def create_dataset(
                 columna_texto=columnaTexto,
                 columna_clase=columnaClase,
                 columna_fecha=columnaFecha,
+                columna_autor=columnaUsuario,
                 formato_original=formatoOriginal,
                 formato_detectado=formatoDetectado,
                 formato_fecha=formatoFecha,

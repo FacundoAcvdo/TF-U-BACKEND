@@ -14,7 +14,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from chroma_service import get_chroma_client, get_or_create_collection
-from prompts import PROMPTS
+from prompts import PROMPTS, PROMPT_TITLE
 
 # ----------------- Config -----------------
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
@@ -58,11 +58,6 @@ def _format_history(chat_history: List[dict]) -> str:
 
 
 class E5Embeddings(HuggingFaceEmbeddings):
-    """HuggingFaceEmbeddings con prefijos obligatorios de E5.
-
-    Documentos indexados -> "passage: ", consultas -> "query: ".
-    Sin prefijos la calidad de recuperación cae fuerte.
-    """
     query_prefix: str = "query: "
     passage_prefix: str = "passage: "
 
@@ -109,7 +104,6 @@ class RAGService:
     # ---------- LLM ----------
     def _init_llm(self):
         if not GOOGLE_API_KEY:
-            print("[rag_service] WARNING: GOOGLE_API_KEY no configurada, LLM deshabilitado")
             self.llm = None
             return
         self.llm = ChatGoogleGenerativeAI(
@@ -118,9 +112,7 @@ class RAGService:
             temperature=0.2,
             top_p=0.9,
         )
-        print("[rag_service] LLM inicializado")
 
-    # ---------- Chroma stores ----------
     def _init_stores(self):
         self.chroma_client = get_chroma_client()
         for key, coll_name in ALL_COLLECTIONS.items():
@@ -135,7 +127,6 @@ class RAGService:
             self.prompts[key] = ChatPromptTemplate.from_template(template)
             print(f"[rag_service] Store '{key}' -> colección '{coll_name}' inicializado")
 
-    # ---------- rag_docs: carga desde disco ----------
     def _discover_documents(self) -> List[str]:
         if not DOCS_PATH:
             print("[rag_service] DOCS_PATH no configurado -> skip")
@@ -217,7 +208,7 @@ class RAGService:
         self._init_embeddings()
         self._init_llm()
         self._init_stores()
-        # Solo rag_docs se reindexa condicionalmente; documents/chunked_chats consumen embeddings ya en Chroma
+        
         try:
             self._reindex_rag_docs()
         except Exception as e:
@@ -236,7 +227,6 @@ class RAGService:
             raise ValueError(f"Colección '{collection}' no existe. Disponibles: {list(self.stores.keys())}")
         return self.stores[collection]
 
-    # ---------- Query genérico por colección ----------
     def query(
         self,
         question: str,
@@ -251,7 +241,6 @@ class RAGService:
         store = self.get_store(collection)
         top_k = k or TOP_K
 
-        # Búsqueda con filtro server-side (Chroma where)
         if filter:
             relevant_docs = store.similarity_search(question, k=top_k, filter=filter)
         else:
@@ -262,8 +251,13 @@ class RAGService:
         prompt = self.prompts[collection]
         prompt_value = prompt.format(context=context, chat_history=history_str, question=question)
         response = self.llm.invoke(prompt_value)
-        # ChatGoogleGenerativeAI retorna AIMessage
+        
         content = response.content if hasattr(response, "content") else str(response)
         return content, relevant_docs
+
+    def generate_title(self, question: str) -> str:
+        resp = self.llm.invoke(PROMPT_TITLE.format(question=question[:500]))
+        titulo = resp.content.strip().strip('"') if hasattr(resp,'content') else str(resp).strip()
+        return titulo[:80]
 
 rag_service = RAGService()

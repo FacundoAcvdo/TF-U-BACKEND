@@ -93,6 +93,28 @@ def get_dataset_by_name(supabase, user_id: str, dataset_name: str) -> Optional[D
             print(f"[supabase_service] ERROR get_dataset_by_name: {e2}")
             raise HTTPException(status_code=500, detail=f"Error buscando dataset '{dataset_name}': {str(e2)}")
 
+def activate_chat_record(supabase, chat_id: str, user_id: str):
+    try:
+        resp = supabase.table("chats").update({"activo": True}).eq("chat_id", chat_id).eq("user_id", user_id).execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail=f"Chat '{chat_id}' no encontrado para el usuario")
+        print(f"[supabase_service] Chat {chat_id} activado para user {user_id}")
+        return resp.data[0]
+    except Exception as e:
+        print(f"[supabase_service] ERROR activate_chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Error activando chat: {str(e)}")
+
+def desactivate_all_chats(supabase, user_id: str):
+    try:
+        resp = supabase.table("chats").update({"activo": False}).eq("user_id", user_id).execute()
+        count = len(resp.data) if resp.data else 0
+        if count:
+            print(f"[supabase_service] Desactivados {count} chats previos de user {user_id}")
+        return count
+    except Exception as e:
+        print(f"[supabase_service] ERROR desactivate_all_chats: {e}")
+        raise HTTPException(status_code=500, detail=f"Error desactivando chats previos: {str(e)}")
+    
 def deactivate_active_chats(supabase, user_id: str, dataset_id: Optional[str] = None):
     try:
         if dataset_id is None:
@@ -200,7 +222,7 @@ def get_active_chat_with_messages(supabase, user_id: str, dataset_id: Optional[s
         return None
     mensajes_raw = get_chat_messages(supabase, chat["chat_id"], user_id)
     mensajes = [_to_public_mensaje(m) for m in mensajes_raw]
-    return {"chat_id": chat_full.get("chat_id"), "fecha_creacion": chat_full.get("fecha_creacion"), "dataset_id": chat_full.get("dataset_id"), "mensajes": mensajes}
+    return {"chat_id": chat_full.get("chat_id"), "titulo": chat_full.get("titulo"), "fecha_creacion": chat_full.get("fecha_creacion"), "dataset_id": chat_full.get("dataset_id"), "mensajes": mensajes}
 
 def get_user_chats_with_stats(supabase, user_id: str) -> List[Dict[str, Any]]:
     chats = _get_user_chats(supabase, user_id)
@@ -218,5 +240,26 @@ def get_user_chats_with_stats(supabase, user_id: str) -> List[Dict[str, Any]]:
             print(f"[supabase_service] WARNING stats chat {cid}: {e}")
             cantidad = 0
             ultimo = None
-        result.append({"chat_id": cid, "fecha_creacion": c.get("fecha_creacion"), "updated_at": c.get("updated_at"), "activo": c.get("activo"), "dataset_id": c.get("dataset_id"), "cantidad_mensajes": cantidad, "ultimo_mensaje": ultimo})
+        result.append({"titulo": c.get("titulo"), "chat_id": cid, "fecha_creacion": c.get("fecha_creacion"), "updated_at": c.get("updated_at"), "activo": c.get("activo"), "dataset_id": c.get("dataset_id"), "cantidad_mensajes": cantidad, "ultimo_mensaje": ultimo})
     return result
+
+def delete_chat(supabase, user_id: str, chat_id: str):
+    try:
+        supabase.table("chat_mensajes").delete().eq("chat_id", chat_id).eq("user_id", user_id).execute()
+        supabase.table("chats").delete().eq("chat_id", chat_id).eq("user_id", user_id).execute()
+        print(f"[supabase_service] Chat {chat_id} y sus mensajes eliminados para user {user_id}")
+    except Exception as e:
+        print(f"[supabase_service] ERROR delete_chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Error eliminando chat: {str(e)}")
+
+def delete_all_chats(supabase, user_id: str):
+    try:
+        supabase.table("chat_mensajes").delete().eq("user_id", user_id).execute()
+        supabase.table("chats").delete().eq("user_id", user_id).execute()
+        print(f"[supabase_service] Todos los chats y mensajes eliminados para user {user_id}")
+    except Exception as e:
+        print(f"[supabase_service] ERROR delete_all_chats: {e}")
+        raise HTTPException(status_code=500, detail=f"Error eliminando todos los chats: {str(e)}")
+
+def update_chat_title(supabase, chat_id, user_id, titulo):
+    supabase.table("chats").update({"titulo": titulo}).eq("chat_id", chat_id).eq("user_id", user_id).execute()

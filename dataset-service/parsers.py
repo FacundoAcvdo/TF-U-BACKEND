@@ -54,6 +54,7 @@ class BaseDocumentParser(ABC):
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
         formato_fecha: str | None = None,
     ) -> list[Document]:
@@ -72,6 +73,7 @@ class DataFrameParser(
         columna_clase: str | None,
         columna_fecha: str | None,
         extra_metadata: dict[str, Any] | None,
+        columna_autor: str | None = None,
         formato_fecha: str | None = None,
     ) -> list[Document]:
 
@@ -112,6 +114,19 @@ class DataFrameParser(
 
             columnas_mapeadas.add(
                 columna_fecha
+            )
+
+        if columna_autor:
+
+            if columna_autor not in df.columns:
+
+                raise ValueError(
+                    f"La columna de autor "
+                    f"'{columna_autor}' no existe."
+                )
+
+            columnas_mapeadas.add(
+                columna_autor
             )
 
         columnas_extra = [
@@ -188,11 +203,29 @@ class DataFrameParser(
 
             fecha = fechas_iso[i] if fechas_iso is not None else None
 
+            autor = None
+
+            if columna_autor:
+
+                value = row.get(columna_autor)
+
+                if value is not None and not (
+                    isinstance(value, float) and pd.isna(value)
+                ):
+                    try:
+                        es_nan = pd.isna(value)
+                    except (TypeError, ValueError):
+                        es_nan = False
+
+                    if not es_nan and str(value).strip():
+                        autor = str(value).strip()
+
             documents.append(
                 Document(
                     texto=text,
                     clase=clase,
                     fecha=fecha,
+                    autor=autor,
                     metadata=metadata,
                 )
             )
@@ -217,6 +250,7 @@ class CSVParser(
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
         formato_fecha: str | None = None,
     ) -> list[Document]:
@@ -229,6 +263,7 @@ class CSVParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            columna_autor=columna_autor,
             formato_fecha=formato_fecha,
         )
 
@@ -292,6 +327,7 @@ class XLSXParser(
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
         formato_fecha: str | None = None,
     ) -> list[Document]:
@@ -314,6 +350,7 @@ class XLSXParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            columna_autor=columna_autor,
             formato_fecha=formato_fecha,
         )
 

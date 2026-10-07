@@ -20,6 +20,17 @@ from supabase_repository import (
 )
 
 
+def _format_chat_line(document: Document) -> str:
+    """Prefija un mensaje como '[fecha] autor: texto'.
+
+    El prefijo queda dentro del texto embebido y recuperado, para que
+    el orden, el autor y la fecha sean útiles en la búsqueda y en el LLM.
+    """
+    fecha = document.fecha or "s/f"
+    autor = (document.autor or "").strip() or "desconocido"
+    return f"[{fecha}] {autor}: {document.texto}"
+
+
 class DatasetService:
 
     def __init__(
@@ -46,6 +57,7 @@ class DatasetService:
         formato_original: str | None,
         formato_detectado: str | None,
         formato_fecha: str | None = None,
+        columna_autor: str | None = None,
         es_chat: bool = False,
         user_id: str,
         user_token: str,
@@ -71,6 +83,7 @@ class DatasetService:
             columna_texto=columna_texto,
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
+            columna_autor=columna_autor,
             formato_original=formato_original,
             formato_detectado=formato_detectado,
             formato_fecha=formato_fecha,
@@ -194,6 +207,7 @@ class DatasetService:
         formato_original: str | None,
         formato_detectado: str | None,
         formato_fecha: str | None = None,
+        columna_autor: str | None = None,
         es_chat: bool = False,
     ) -> list[Document]:
 
@@ -213,11 +227,23 @@ class DatasetService:
             if value is not None
         }
 
+        # Chats de WhatsApp: el .txt se convierte a CSV con columnas
+        # fijas fecha,hora,remitente,mensaje, por lo que el autor se infiere
+        # sin pedirlo en el front.
+        columna_autor_resuelto = columna_autor
+        if (
+            es_chat
+            and formato_detectado == "whatsapp-chat"
+            and not columna_autor_resuelto
+        ):
+            columna_autor_resuelto = "remitente"
+
         documents = parser.parse(
             content=content,
             columna_texto=columna_texto,
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
+            columna_autor=columna_autor_resuelto,
             extra_metadata=extra_metadata,
             formato_fecha=formato_fecha,
         )
@@ -393,7 +419,11 @@ class DatasetService:
                 meta["fecha_hasta"] = fechas[-1]
 
             ids.append(str(uuid.uuid4()))
-            texts.append("\n".join(d.texto for d in ventana))
+            texts.append(
+                "\n".join(
+                    _format_chat_line(d) for d in ventana
+                )
+            )
             metadatas.append(meta)
 
             chunk_index += 1

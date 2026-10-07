@@ -6,15 +6,19 @@ from pydantic import BaseModel
 
 from rag_service import rag_service
 from supabase_service import (
+    activate_chat_record,
+    delete_all_chats,
+    delete_chat,
+    desactivate_all_chats,
     get_supabase_client,
     create_chat_record,
     get_active_chat,
-    delete_chat_record,
     create_message,
     get_chat_messages,
     get_active_chat_with_messages,
     get_user_chats_with_stats,
     get_dataset_by_name,
+    update_chat_title,
 )
 
 
@@ -55,6 +59,9 @@ class ChatMessageRequest(BaseModel):
 
 class CreateChatRequest(BaseModel):
     dataset_name: str | None = None
+
+class ActivateChatRequest(BaseModel):
+    chat_id: str
 
 @app.post("/chat")
 async def create_chat(
@@ -167,9 +174,19 @@ async def send_message(
         print(f"[main] WARNING no se pudo guardar respuesta asistente: {e}")
         raise HTTPException(status_code=500, detail=f"Error guardando respuesta: {str(e)}")
 
+    es_primer = len(mensajes_previos) == 0
+    titulo = None
+    if es_primer and not chat.get("titulo"):
+        try:
+            titulo = rag_service.generate_title(pregunta)
+            update_chat_title(supabase, chat_id, x_user_id, titulo)
+        except Exception as e:
+            print(f"WARNING título: {e}")
+
     return {
         "respuesta": msg_asistente,
         "pregunta": msg_usuario,
+        "titulo": titulo,
     }
 
 
@@ -206,7 +223,6 @@ async def list_chats(
     try:
         chats = get_user_chats_with_stats(supabase, x_user_id)
         return {
-            "user_id": x_user_id,
             "total": len(chats),
             "chats": chats
         }
@@ -218,18 +234,54 @@ async def list_chats(
 
 
 @app.delete("/chat")
-async def delete_chat(
+async def delete_chat_record(
+    data: ActivateChatRequest = Body(...),
     x_user_id: str = Header(..., alias="X-User-ID"),
     supabase=Depends(get_supabase),
 ):
     try:
-        chat = get_active_chat(supabase, x_user_id)
-        if not chat:
-            raise HTTPException(status_code=404, detail="No hay chat activo para eliminar")
-        delete_chat_record(supabase, chat["chat_id"], x_user_id)
-        return {"message": "Chat activo eliminado", "chat_id": chat["chat_id"]}
+        delete_chat(supabase, x_user_id, data.chat_id)
     except HTTPException:
         raise
     except Exception as e:
         print(f"[main] Error delete_chat activo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/chats")
+async def delete_all(
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    supabase=Depends(get_supabase),
+):
+    try:
+        delete_all_chats(supabase, x_user_id)
+        return {"message": f"Todos los chats eliminados para el usuario {x_user_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[main] Error delete_all_chats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/activate_chat")
+async def activate_chat(
+    data: ActivateChatRequest = Body(...),
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    supabase=Depends(get_supabase),
+):
+    chat_id = data.chat_id
+
+    try:
+        if not chat_id:
+            raise HTTPException(status_code=400, detail="chat_id es requerido para activar un chat")
+        chat = get_active_chat(supabase, x_user_id)
+        if chat and chat["chat_id"] == chat_id:
+            return {"message": "El chat ya está activo", "chat_id": chat_id}
+        desactivate_all_chats(supabase, x_user_id)
+
+        new_chat = activate_chat_record(supabase, chat_id, x_user_id)
+        return {
+            "message": "Chat activado",
+            "chat_id": new_chat["chat_id"],
+        }
+    except Exception as e:
+        print(f"[main] Error activating chat: {e}")
+        raise HTTPException(status_code=500, detail="Error al activar el chat")
