@@ -1,8 +1,13 @@
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-# Python 3.12 en base CUDA (no trae python)
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Python + build-essential en una sola capa (se purga al final del pip install)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
+    python3 python3-pip build-essential \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && pip3 install --no-cache-dir --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
@@ -10,9 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
-
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x[ctk]" || pip install --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x" || echo "[clustering-service] cuML no instalado - fallback CPU"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir -r requirements.txt && \
+    (pip3 install --no-cache-dir --extra-index-url=https://pypi.nvidia.com "cuml-cu12==24.12.*" "cupy-cuda12x" || echo "[clustering-service] cuML no instalado - fallback CPU") && \
+    apt-get purge -y --auto-remove build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY . .
 

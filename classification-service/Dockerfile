@@ -1,22 +1,29 @@
-FROM python:3.11-slim
+FROM proyecto/ml-base AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/root/.cache/huggingface
-ENV OMP_NUM_THREADS=4
-ENV MKL_NUM_THREADS=4
-
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
+    build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install torch --index-url https://download.pytorch.org/whl/cpu
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+# torch ya viene en la base (cu121): pip lo ve satisfecho y no trae otra variante
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install -r requirements.txt
 
+FROM proyecto/ml-base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/root/.cache/huggingface \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4
+
+WORKDIR /app
+COPY --from=builder /install /usr/local
 COPY . .
 
 EXPOSE 8087
