@@ -1,0 +1,12 @@
+{
+  "accuracy": 0.848605577689243,
+  "f1": 0.6363636363636364,
+  "precision": 0.7,
+  "recall": 0.5833333333333334,
+  "n_train": 4016,
+  "n_test": 1004,
+  "embedding_model": "intfloat/multilingual-e5-large",
+  "embedding_dim": 1024,
+  "dataset": "ourafla/Mental-Health_Text-Classification_Dataset",
+  "date": "2026-10-03T19:37:30.261785+00:00"
+}
