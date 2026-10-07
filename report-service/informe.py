@@ -1,5 +1,5 @@
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from xml.sax.saxutils import escape as _xml
 
 import matplotlib
@@ -33,12 +33,6 @@ VIOLETA = "#9333ea"
 PALETA = [AZUL, CELESTE, NARANJA, ROJO, VIOLETA, "#475569", "#a16207", "#15803d"]
 REJILLA = "#e5e7eb"
 BORDE = "#d1d5db"
-
-OSCURO_FONDO = "#14161c"
-OSCURO_TEXTO = "#e8eaf0"
-OSCURO_SUAVE = "#9aa0b4"
-OSCURO_REJILLA = "#232733"
-OSCURO_BORDE = "#2a2e3a"
 
 
 def _figura(ancho=7.5, alto=3.6):
@@ -100,28 +94,6 @@ def graficar_barras(pares: list[tuple[str, float]], titulo: str,
     return _a_png(fig)
 
 
-def graficar_lineas(series: list[tuple[str, list[tuple[str, float]]]],
-                    titulo: str) -> bytes | None:
-    series = [(str(n), [(str(x), float(v)) for x, v in pts]) for n, pts in series]
-    series = [(n, pts) for n, pts in series if pts]
-    if not series:
-        return None
-    fig, ax = _figura(alto=4.0)
-    for i, (nombre, puntos) in enumerate(series[:8]):
-        xs = [x for x, _ in puntos]
-        ys = [v for _, v in puntos]
-        ax.plot(xs, ys, marker="o", markersize=4, linewidth=1.8,
-                color=PALETA[i % len(PALETA)], label=_acortar(nombre, 15))
-    plt.setp(ax.get_xticklabels(), rotation=25, ha="right")
-    ax.set_title(titulo, color=TEXTO, fontsize=11, pad=10)
-    leg = ax.legend(frameon=True, fontsize=8, loc="best")
-    leg.get_frame().set_facecolor("#ffffff")
-    leg.get_frame().set_edgecolor("#e5e7eb")
-    for texto in leg.get_texts():
-        texto.set_color(SUAVE)
-    return _a_png(fig)
-
-
 def graficar_dispersion(puntos: list[tuple[float, float, str]]) -> bytes | None:
     limpios = []
     for p in puntos[:2000]:
@@ -133,84 +105,21 @@ def graficar_dispersion(puntos: list[tuple[float, float, str]]) -> bytes | None:
         return None
     etiquetas = sorted({c for _, _, c in limpios})
     color_por = {c: PALETA[i % len(PALETA)] for i, c in enumerate(etiquetas)}
-    fig, ax = plt.subplots(figsize=(7.5, 4.2))
-    fig.patch.set_facecolor(OSCURO_FONDO)
-    ax.set_facecolor(OSCURO_FONDO)
-    ax.tick_params(colors=OSCURO_SUAVE, labelsize=8)
-    for etiqueta in ax.get_xticklabels() + ax.get_yticklabels():
-        etiqueta.set_color(OSCURO_SUAVE)
-    for spine in ax.spines.values():
-        spine.set_color(OSCURO_BORDE)
-    ax.grid(color=OSCURO_REJILLA, linewidth=0.6, linestyle="--", alpha=0.9)
-    ax.set_axisbelow(True)
+    fig, ax = _figura(alto=4.2)
     for c in etiquetas:
         xs = [x for x, _, cc in limpios if cc == c]
         ys = [y for _, y, cc in limpios if cc == c]
         ax.scatter(xs, ys, s=10, alpha=0.65, color=color_por[c],
                    label=_acortar(c, 15), edgecolors="none")
-    ax.set_title("Mapa de embeddings (2D)", color=OSCURO_TEXTO, fontsize=11, pad=10)
-    ax.set_xlabel("Dimensión 1", color=OSCURO_SUAVE, fontsize=9)
-    ax.set_ylabel("Dimensión 2", color=OSCURO_SUAVE, fontsize=9)
+    ax.set_title("Mapa de embeddings (2D)", color=TEXTO, fontsize=11, pad=10)
+    ax.set_xlabel("Dimensión 1", color=SUAVE, fontsize=9)
+    ax.set_ylabel("Dimensión 2", color=SUAVE, fontsize=9)
     if len(etiquetas) <= 10:
         leg = ax.legend(frameon=True, fontsize=8, loc="best")
-        leg.get_frame().set_facecolor(OSCURO_FONDO)
-        leg.get_frame().set_edgecolor(OSCURO_BORDE)
+        leg.get_frame().set_facecolor("#ffffff")
+        leg.get_frame().set_edgecolor("#e5e7eb")
         for texto in leg.get_texts():
-            texto.set_color(OSCURO_SUAVE)
-    fig.tight_layout()
-    return _a_png(fig)
-
-
-def graficar_torta(pares: list[tuple[str, float]], titulo: str) -> bytes | None:
-    pares = [(str(e), float(v)) for e, v in pares if v and float(v) > 0][:10]
-    if not pares:
-        return None
-    fig, ax = plt.subplots(figsize=(6.5, 3.8))
-    fig.patch.set_facecolor(FONDO)
-    ax.set_facecolor(FONDO)
-    etiquetas = [_acortar(e, 15) for e, _ in pares]
-    valores = [v for _, v in pares]
-    cuñas, _, autotextos = ax.pie(
-        valores, labels=etiquetas, autopct="%1.1f%%",
-        colors=[PALETA[i % len(PALETA)] for i in range(len(pares))],
-        textprops={"color": SUAVE, "fontsize": 8},
-        wedgeprops={"edgecolor": FONDO, "linewidth": 2},
-    )
-    for t in autotextos:
-        t.set_color(TEXTO)
-        t.set_fontsize(8)
-    ax.set_title(titulo, color=TEXTO, fontsize=11, pad=10)
-    return _a_png(fig)
-
-
-def graficar_matriz(clases: list[str], matriz: list[list[int]], titulo: str) -> bytes | None:
-    import numpy as _np
-    try:
-        m = _np.array([[int(x) for x in fila] for fila in matriz], dtype=float)
-    except (TypeError, ValueError):
-        return None
-    if m.size == 0 or m.shape[0] != m.shape[1] or m.shape[0] == 0:
-        return None
-    n = m.shape[0]
-    nombres = [_acortar(c, 12) for c in (clases or [str(i) for i in range(n)])]
-    fig, ax = plt.subplots(figsize=(max(4.5, n * 1.1), max(3.5, n * 0.9)))
-    fig.patch.set_facecolor(FONDO)
-    ax.set_facecolor(FONDO)
-    im = ax.imshow(m, cmap="Blues", aspect="equal")
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    ax.set_xticklabels(nombres, color=SUAVE, fontsize=8, rotation=25, ha="right")
-    ax.set_yticklabels(nombres, color=SUAVE, fontsize=8)
-    ax.set_xlabel("Predicha", color=SUAVE, fontsize=9)
-    ax.set_ylabel("Real", color=SUAVE, fontsize=9)
-    maximo = m.max() if m.max() > 0 else 1.0
-    for i in range(n):
-        for j in range(n):
-            oscuro = m[i, j] >= maximo * 0.6
-            ax.text(j, i, int(m[i, j]), ha="center", va="center", fontsize=9,
-                    color="#ffffff" if oscuro else TEXTO,
-                    fontweight="bold" if i == j else "normal")
-    ax.set_title(titulo, color=TEXTO, fontsize=11, pad=12)
+            texto.set_color(SUAVE)
     fig.tight_layout()
     return _a_png(fig)
 
@@ -261,35 +170,6 @@ def _tabla_datos(encabezados: list[str], filas: list[list], cuerpo=None) -> Tabl
     return tabla
 
 
-def _tabla_matriz(clases: list[str], matriz: list[list[int]]):
-    if not clases or not matriz:
-        return None
-    nombres = [_acortar(c, 14) for c in clases]
-    datos = [[_celda("Real \\ Pred", negrita=True)] +
-             [_celda(n, negrita=True) for n in nombres]]
-    for i, fila in enumerate(matriz):
-        nombre = nombres[i] if i < len(nombres) else str(i)
-        datos.append([_celda(nombre, negrita=True)] +
-                     [_celda(int(v)) for v in fila])
-    n = len(nombres) + 1
-    estilos = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.white),
-        ("BACKGROUND", (0, 1), (0, -1), colors.white),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#2a2e3a")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]
-    for i in range(len(matriz)):
-        if i < n - 1:
-            estilos.append(("BACKGROUND", (i + 1, i + 1), (i + 1, i + 1),
-                            colors.HexColor("#dbeafe")))
-    tabla = Table(datos)
-    tabla.setStyle(TableStyle(estilos))
-    return tabla
-
-
 def _estilos():
     base = getSampleStyleSheet()
     titulo = ParagraphStyle("Titulo", parent=base["Heading1"], fontSize=24,
@@ -306,7 +186,28 @@ def _estilos():
                             leading=14)
     pie = ParagraphStyle("Pie", parent=base["Normal"], fontSize=8,
                          textColor=colors.HexColor("#9aa0b4"), alignment=2)
-    return titulo, subtitulo, h2, cuerpo, pie
+    aviso = ParagraphStyle("Aviso", parent=base["Normal"], fontName="Helvetica-Bold",
+                           fontSize=8, textColor=colors.HexColor("#111827"),
+                           spaceBefore=8, spaceAfter=8, leading=11)
+    return titulo, subtitulo, h2, cuerpo, pie, aviso
+
+
+AVISO_LEGAL = (
+    "<b>AVISO IMPORTANTE:</b> el presente documento es un reporte técnico generado "
+    "automáticamente a partir de las actividades y análisis realizados por el usuario "
+    "en la plataforma de análisis de datos, con fines exclusivamente descriptivos y "
+    "académicos. No constituye diagnóstico, evaluación clínica, concepto profesional "
+    "ni recomendación de intervención. Los resultados provienen de modelos automáticos "
+    "que pueden contener errores y deben ser interpretados por personal calificado."
+)
+
+
+def _ahora_argentina() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=-3)))
 
 
 def _pie_pagina(canvas, doc):
@@ -362,16 +263,17 @@ def incrustar_svg(svg: str, ancho=15 * cm):
 
 
 def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None = None) -> bytes:
-    titulo, subtitulo, h2, cuerpo, _pie = _estilos()
-    fecha = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+    titulo, subtitulo, h2, cuerpo, _pie, aviso = _estilos()
+    fecha = _ahora_argentina().strftime("%d/%m/%Y %H:%M ART")
     nombre_ds = _xml(dataset)
     historia = [
-        Spacer(1, 3 * cm),
+        Spacer(1, 1 * cm),
         Paragraph("Informe de análisis de datos", titulo),
         Spacer(1, 0.3 * cm),
         Paragraph(f"Dataset: <b>{nombre_ds}</b>", subtitulo),
         Paragraph(f"Generado: {fecha} &nbsp;·&nbsp; Secciones: {len(secciones)}", subtitulo),
     ]
+    historia.append(Paragraph(AVISO_LEGAL, aviso))
     if omitidas:
         historia.append(Paragraph(
             f"<i>Se omitieron secciones sin datos: {', '.join(omitidas)}.</i>", cuerpo))
@@ -405,10 +307,6 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
                 if img is not None:
                     historia.append(img)
                     historia.append(Spacer(1, 0.25 * cm))
-        for nombre_tabla, tabla in sec.get("tablas", []):
-            historia.append(Paragraph(f"Matriz de confusión — {_xml(str(nombre_tabla))}", cuerpo))
-            historia.append(tabla)
-            historia.append(Spacer(1, 0.25 * cm))
         for titulo_tabla, encabezados, filas in sec.get("tablas_datos", []):
             historia.append(Paragraph(_xml(str(titulo_tabla)), cuerpo))
             historia.append(_tabla_datos(encabezados, filas))

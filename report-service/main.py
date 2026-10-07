@@ -11,7 +11,6 @@ from informe import (
     componer_pdf,
     graficar_barras,
     graficar_dispersion,
-    _tabla_matriz,
 )
 from inventario import FUENTE_POR_SECCION, SECCIONES, TITULOS, get_supabase_client, inventario, leer_fuente, resolver_dataset
 
@@ -358,6 +357,137 @@ def construir_emociones(d: dict) -> dict:
     }
 
 
+def construir_topicos(d: dict) -> dict:
+    topicos = d.get("topics", []) or []
+    pares = []
+    filas_tabla = []
+    for t in topicos:
+        if not isinstance(t, dict):
+            continue
+        nombre = str(t.get("title") or t.get("titulo") or f"Tópico {t.get('topic_id', '?')}")
+        try:
+            cant = int(t.get("document_count", 0))
+        except (TypeError, ValueError):
+            cant = 0
+        pares.append((nombre, float(cant)))
+        kws = t.get("keywords", []) or []
+        filas_tabla.append([nombre, str(cant),
+                            ", ".join(str(k) for k in kws[:10]) if kws else "—"])
+    graficos = []
+    png = graficar_barras(sorted(pares, key=lambda kv: kv[1], reverse=True)[:15],
+                          "Documentos por tópico", horizontal=True)
+    if png:
+        graficos.append(png)
+    return {
+        "titulo": "Tópicos principales",
+        "descripcion": f"{len(topicos)} tópicos sobre {d.get('document_count', '?')} documentos.",
+        "metricas": [
+            ("Tópicos", str(d.get("topic_count", len(topicos)))),
+            ("Documentos", str(d.get("document_count", "?"))),
+            ("Atípicos", str(d.get("outlier_count", "?"))),
+        ],
+        "graficos": graficos,
+        "tablas_datos": (
+            [("Tópicos con palabras clave", ["Tópico", "Docs", "Palabras clave"], filas_tabla)]
+            if filas_tabla else []
+        ),
+    }
+
+
+def construir_chats(d: dict) -> dict:
+    chats = d.get("chats", []) or []
+    total_mensajes = int(d.get("total_mensajes", 0) or 0)
+    n_usu = n_asi = 0
+    tablas_datos = []
+    for c in chats:
+        mensajes = c.get("mensajes", []) or []
+        filas = []
+        for i, m in enumerate(mensajes, start=1):
+            autor = str(m.get("autor", "?"))
+            texto = str(m.get("mensaje", ""))
+            if len(texto) > 800:
+                texto = texto[:800] + "…"
+            filas.append([str(i), autor, texto])
+            a = autor.lower()
+            if a in ("usuario", "user", "human"):
+                n_usu += 1
+            else:
+                n_asi += 1
+        if filas:
+            titulo = f"Chat {c.get('chat_id', '?')} — {c.get('fecha_creacion', '')}"
+            tablas_datos.append((titulo, ["#", "Autor", "Mensaje"], filas))
+    return {
+        "titulo": "Chats del chatbot",
+        "descripcion": f"{len(chats)} chats con {total_mensajes} mensajes para este dataset.",
+        "metricas": [
+            ("Chats", str(len(chats))),
+            ("Mensajes", str(total_mensajes)),
+            ("De usuario", str(n_usu)),
+            ("Del asistente", str(n_asi)),
+        ],
+        "graficos": [],
+        "tablas_datos": tablas_datos,
+    }
+
+
+def construir_riesgo(d: dict) -> dict:
+    resumen = d.get("resumen", {}) or {}
+    counts = resumen.get("counts", {}) or {}
+    orden = ["alto", "potencial", "medio", "bajo", "nulo"]
+    pares = []
+    for nivel in orden:
+        try:
+            pares.append((nivel, float(counts.get(nivel, 0) or 0)))
+        except (TypeError, ValueError):
+            continue
+    graficos = []
+    png = graficar_barras(pares, "Casos por nivel de riesgo")
+    if png:
+        graficos.append(png)
+    metricas = [
+        ("Casos analizados", str(resumen.get("total", "?"))),
+        ("% alto + potencial", str(resumen.get("pct_alto_potencial", "?"))),
+        ("Score medio", str(resumen.get("score_medio", "?"))),
+        ("Modelo", str(d.get("modelo_version", "?"))),
+    ]
+    for nivel in orden:
+        metricas.append((f"Nivel {nivel}", str(counts.get(nivel, 0))))
+    tablas_datos = []
+    por_clase = d.get("por_clase", {}) or {}
+    if isinstance(por_clase, dict) and por_clase:
+        filas_pc = []
+        for clase, agg in por_clase.items():
+            if not isinstance(agg, dict):
+                continue
+            filas_pc.append([str(clase), str(agg.get("total", "?")),
+                             str(agg.get("alto", "?")), str(agg.get("potencial", "?"))])
+        if filas_pc:
+            tablas_datos.append(("Riesgo por clase", ["Clase", "Total", "Alto", "Potencial"], filas_pc))
+    top_items = d.get("top_items", []) or []
+    if isinstance(top_items, list) and top_items:
+        filas_top = []
+        for it in top_items[:30]:
+            if not isinstance(it, dict):
+                continue
+            texto = str(it.get("texto", ""))
+            if len(texto) > 300:
+                texto = texto[:300] + "…"
+            trigs = it.get("triggers", []) or []
+            filas_top.append([texto, str(it.get("nivel", "?")),
+                              str(it.get("score_a", "?")),
+                              ", ".join(str(t) for t in trigs[:5]) if trigs else "—"])
+        if filas_top:
+            tablas_datos.append(("Casos de mayor riesgo", ["Texto", "Nivel", "Score", "Triggers"], filas_top))
+    out = {
+        "titulo": "Nivel de riesgo",
+        "descripcion": "Riesgo suicida detectado por el modelo (solo artefactos guardados).",
+        "metricas": metricas,
+        "graficos": graficos,
+        "tablas_datos": tablas_datos,
+    }
+    return out
+
+
 def construir_evolucion(d: dict) -> dict:
     metricas: list[tuple[str, str]] = []
     tablas_datos = []
@@ -383,55 +513,6 @@ def construir_evolucion(d: dict) -> dict:
     }
 
 
-def construir_clasificador(d: dict) -> dict:
-    tablas = []
-    filas_resumen = []
-    nombres_cortos = {}
-    for m in d.get("modelos", []) or []:
-        nombre = m.get("nombre_archivo", "?")
-        corto = nombre.replace("_modelo.zip", "").replace("_", " ").strip() or nombre
-        base = corto
-        i = 2
-        while base in nombres_cortos:
-            base = f"{corto} ({i})"
-            i += 1
-        nombres_cortos[base] = True
-        mets = m.get("metricas", {}) or {}
-
-        def pct(clave):
-            try:
-                return f"{float(mets[clave]) * 100:.2f}%" if mets.get(clave) is not None else "—"
-            except (TypeError, ValueError):
-                return "—"
-
-        filas_resumen.append([
-            base,
-            pct("Accuracy"),
-            pct("F1-score weighted"),
-            pct("Precision weighted"),
-            pct("Recall weighted"),
-        ])
-        clases = m.get("clases") or []
-        matriz = m.get("matriz")
-        if matriz and clases and len(matriz) == len(clases):
-            from informe import _tabla_matriz
-            tabla = _tabla_matriz(clases, matriz)
-            if tabla is not None:
-                tablas.append((nombre, tabla))
-    return {
-        "titulo": "Clasificador entrenado",
-        "descripcion": "Comparativa de modelos y matrices de confusión.",
-        "metricas": [],
-        "graficos": [],
-        "tablas": tablas,
-        "tablas_datos": (
-            [("Comparativa de modelos",
-              ["Modelo", "Accuracy", "F1", "Precisión", "Recall"],
-              filas_resumen)] if filas_resumen else []
-        ),
-    }
-
-
 def construir_resumen(dataset: str, fuentes: dict) -> dict:
     metricas: list[tuple[str, str]] = []
     eda = fuentes.get("estadisticas")
@@ -451,19 +532,6 @@ def construir_resumen(dataset: str, fuentes: dict) -> dict:
     evo = fuentes.get("evolucion")
     if isinstance(evo, dict):
         metricas.append(("Evoluciones guardadas", str(len(evo.get("filas", []) or []))))
-    clf = fuentes.get("clasificador")
-    if isinstance(clf, dict):
-        mejor = None
-        for m in clf.get("modelos", []) or []:
-            acc = (m.get("metricas", {}) or {}).get("Accuracy")
-            try:
-                acc = float(acc) if acc is not None else None
-            except (TypeError, ValueError):
-                acc = None
-            if acc is not None and (mejor is None or acc > mejor[1]):
-                mejor = (m.get("nombre_archivo", "?"), acc)
-        if mejor is not None:
-            metricas.append((f"Mejor modelo ({mejor[0]})", f"{mejor[1] * 100:.2f}% accuracy"))
     if not metricas:
         metricas.append(("Dataset", dataset))
     return {
@@ -480,7 +548,9 @@ CONSTRUCTORES = {
     "embeddings": construir_embeddings,
     "emociones": construir_emociones,
     "evolucion": construir_evolucion,
-    "clasificador": construir_clasificador,
+    "topicos": construir_topicos,
+    "chats": construir_chats,
+    "riesgo": construir_riesgo,
 }
 
 

@@ -1,13 +1,4 @@
-import io
 import os
-import re
-import zipfile
-
-README_DATASET_RE = re.compile(r"-\s*Dataset:\s*\*\*(.+?)\*\*")
-README_METRICA_RE = re.compile(r"-\s*(Accuracy|F1-score weighted|Precision weighted|Recall weighted):\s*\*\*([0-9.]+)\*\*")
-
-RESULTADOS_PATH = os.environ.get("RESULTADOS_PATH", "/app/data/resultados")
-MODELOS_DIRNAME = "modelos"
 
 SECCIONES = [
     "estadisticas",
@@ -19,7 +10,6 @@ SECCIONES = [
     "embeddings",
     "chats",
     "emociones",
-    "clasificador",
 ]
 
 TITULOS = {
@@ -32,7 +22,6 @@ TITULOS = {
     "embeddings": "Visualización de embeddings",
     "chats": "Chats del chatbot",
     "emociones": "Emociones negativas",
-    "clasificador": "Clasificador entrenado",
 }
 
 FUENTE_POR_SECCION = {
@@ -41,7 +30,9 @@ FUENTE_POR_SECCION = {
     "embeddings": "embeddings",
     "emociones": "emociones",
     "evolucion": "evolucion",
-    "clasificador": "clasificador",
+    "topicos": "topicos",
+    "chats": "chats",
+    "riesgo": "riesgo",
 }
 
 
@@ -90,45 +81,70 @@ def leer_fila(supabase, tabla: str, user_id: str, dataset_id: str, columnas: str
     return None
 
 
-def modelos_del_dataset(dataset_name: str) -> list[dict]:
-    encontrados: list[dict] = []
-    base = os.path.join(RESULTADOS_PATH, MODELOS_DIRNAME)
+def filas_topicos(supabase, user_id: str, dataset_id: str):
     try:
-        archivos = os.listdir(base)
-    except OSError:
-        return encontrados
-    for nombre in sorted(archivos):
-        if not nombre.endswith(".zip"):
-            continue
-        ruta = os.path.join(base, nombre)
+        respuesta = (
+            supabase.table("topicmodeling_results")
+            .select("document_count,topic_count,outlier_count,outlier_percentage,topics,max_topics")
+            .eq("dataset_id", dataset_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        filas = respuesta.data or []
+        if not filas:
+            return None
+        return max(filas, key=lambda f: int(f.get("topic_count") or 0))
+    except Exception:
+        return None
+
+
+def filas_chats(supabase, user_id: str, dataset_id: str, limite_por_chat: int = 200):
+    try:
+        resp = (
+            supabase.table("chats")
+            .select("chat_id,fecha_creacion,dataset_id,activo")
+            .eq("dataset_id", dataset_id)
+            .eq("user_id", user_id)
+            .order("fecha_creacion", desc=False)
+            .execute()
+        )
+        chats = resp.data or []
+    except Exception:
+        return None
+    if not chats:
+        return None
+    salida = []
+    for c in chats:
+        cid = c.get("chat_id")
         try:
-            with zipfile.ZipFile(ruta) as zf:
-                if "README.md" not in zf.namelist():
-                    continue
-                texto = zf.read("README.md").decode("utf-8", errors="ignore")
+            rm = (
+                supabase.table("chat_mensajes")
+                .select("autor,mensaje,created_at")
+                .eq("chat_id", cid)
+                .eq("user_id", user_id)
+                .order("created_at")
+                .limit(limite_por_chat)
+                .execute()
+            )
+            mensajes = rm.data or []
         except Exception:
-            continue
-        m = README_DATASET_RE.search(texto)
-        if not m or m.group(1).strip() != dataset_name:
-            continue
-        metricas = {
-            k: float(v) for k, v in README_METRICA_RE.findall(texto)
-        }
-        sidecar = os.path.join(base, nombre[:-4] + ".name")
-        nombre_archivo = nombre
-        try:
-            with open(sidecar, encoding="utf-8") as f:
-                leido = f.read().strip()
-                if leido:
-                    nombre_archivo = leido
-        except OSError:
-            pass
-        encontrados.append({
-            "model_id": nombre[:-4],
-            "nombre_archivo": nombre_archivo,
-            "metricas": metricas,
+            mensajes = []
+        salida.append({
+            "chat_id": str(cid)[:8],
+            "fecha_creacion": c.get("fecha_creacion"),
+            "mensajes": mensajes,
         })
-    return encontrados
+    total_mensajes = sum(len(c["mensajes"]) for c in salida)
+    if total_mensajes == 0:
+        return None
+    return {"chats": salida, "total_chats": len(salida),
+            "total_mensajes": total_mensajes}
+
+
+def filas_riesgo(supabase, user_id: str, dataset_id: str):
+    return leer_fila(supabase, "suicide_results", user_id, dataset_id,
+                     "modelo_version,trained_at,thresholds,resumen,por_clase,"
+                     "skipped_sin_embedding,verificados_b,top_items,disclaimer")
 
 
 def filas_evolucion(supabase, user_id: str, dataset_id: str) -> list[dict]:
@@ -158,7 +174,9 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
     emo = leer_fila(supabase, "emotions_results", user_id, dataset_id,
                      "emotions")
     evos = filas_evolucion(supabase, user_id, dataset_id)
-    modelos = modelos_del_dataset(dataset_name)
+    tops = filas_topicos(supabase, user_id, dataset_id)
+    rac = filas_chats(supabase, user_id, dataset_id)
+    rgo = filas_riesgo(supabase, user_id, dataset_id)
 
     detalles = {
         "estadisticas": "Resumen descriptivo del corpus y distribución por clase." if eda else "",
@@ -168,7 +186,6 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
                        f"{emb.get('total', '?')} documentos.") if emb and (emb.get("total") or 0) > 0 else "",
         "emociones": (f"{len(emo.get('emotions', []))} emociones detectadas.") if emo and emo.get("emotions") else "",
         "evolucion": "",
-        "clasificador": "",
     }
     if evos:
         remitentes = sorted({str(f.get("remitente", "?")) for f in evos})
@@ -176,10 +193,21 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
             f"{len(evos)} análisis guardados "
             f"({', '.join(remitentes[:3])}{'...' if len(remitentes) > 3 else ''})."
         )
-    if modelos:
-        detalles["clasificador"] = (
-            f"{len(modelos)} modelo(s): "
-            f"{', '.join(m.get('nombre_archivo', '') for m in modelos[:2])}."
+    if tops:
+        detalles["topicos"] = (
+            f"{tops.get('topic_count', '?')} tópicos sobre "
+            f"{tops.get('document_count', '?')} documentos."
+        )
+    if rac:
+        detalles["chats"] = (
+            f"{rac.get('total_chats', '?')} chats con "
+            f"{rac.get('total_mensajes', '?')} mensajes."
+        )
+    if rgo:
+        res = rgo.get("resumen", {}) or {}
+        detalles["riesgo"] = (
+            f"{res.get('total', '?')} casos, "
+            f"{res.get('pct_alto_potencial', '?')}% alto/potencial."
         )
 
     disponibles = {
@@ -188,7 +216,9 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
         "embeddings": emb is not None and (emb.get("total") or 0) > 0,
         "emociones": emo is not None and bool(emo.get("emotions")),
         "evolucion": len(evos) > 0,
-        "clasificador": len(modelos) > 0,
+        "topicos": tops is not None,
+        "chats": rac is not None,
+        "riesgo": rgo is not None,
     }
 
     secciones = []
@@ -222,6 +252,12 @@ def leer_fuente(supabase, seccion_id: str, dataset_name: str, user_id: str, data
     if seccion_id == "emociones":
         return leer_fila(supabase, "emotions_results", user_id, dataset_id,
                          "emotions,corpus_stats,class_stats,correlation,distribution,top_words,class_top_words")
+    if seccion_id == "topicos":
+        return filas_topicos(supabase, user_id, dataset_id)
+    if seccion_id == "chats":
+        return filas_chats(supabase, user_id, dataset_id)
+    if seccion_id == "riesgo":
+        return filas_riesgo(supabase, user_id, dataset_id)
     if seccion_id == "evolucion":
         try:
             respuesta = (
@@ -234,39 +270,4 @@ def leer_fuente(supabase, seccion_id: str, dataset_name: str, user_id: str, data
             return {"filas": respuesta.data or []}
         except Exception:
             return None
-    if seccion_id == "clasificador":
-        modelos = modelos_del_dataset(dataset_name)
-        detalle = []
-        for m in modelos:
-            info = {"model_id": m["model_id"], "nombre_archivo": m["nombre_archivo"],
-                    "metricas": m["metricas"]}
-            datos = leer_checkpoint_clasificador(m["model_id"])
-            if datos is not None:
-                info.update(datos)
-            detalle.append(info)
-        return {"modelos": detalle} if detalle else None
     return None
-
-
-def leer_checkpoint_clasificador(model_id: str):
-    import re as _re
-    ruta = os.path.join(RESULTADOS_PATH, MODELOS_DIRNAME, f"{model_id}.zip")
-    try:
-        with zipfile.ZipFile(ruta) as zf:
-            texto = zf.read("README.md").decode("utf-8", errors="ignore")
-    except Exception:
-        return None
-    clases = _re.findall(r"-\s*`(.+?)`\s*→\s*`(\d+)`", texto)
-    matriz = None
-    m = _re.search(r"\| Real / Predicha[^\n]*\n\|(?:---\|)+\n((?:\|[^\n]*\n)+)", texto)
-    if m:
-        filas = []
-        for linea in m.group(1).strip().splitlines():
-            celdas = [c.strip() for c in linea.strip().strip("|").split("|")]
-            try:
-                filas.append([int(x) for x in celdas[1:]])
-            except ValueError:
-                continue
-        if filas and all(len(f) == len(filas) for f in filas):
-            matriz = filas
-    return {"clases": [c for c, _ in clases], "matriz": matriz}
