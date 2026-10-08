@@ -1,26 +1,30 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS builder
 
-# Evita que Python bufferice logs y no guarde bytecode innecesario
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
-
-# 1. Herramientas del sistema necesarias para compilar hdbscan/umap
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Instalar dependencias de Python
+WORKDIR /app
 COPY requirements.txt .
+# torch CPU primero para que sentence-transformers/bertopic no arrastren la variante CUDA de PyPI
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --prefix=/install torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --prefix=/install -r requirements.txt
 
-# 3. Pre-descargar las stopwords en la imagen (para que el contenedor arranque al instante)
-RUN python -m nltk.downloader stopwords
+FROM python:3.12-slim
 
-# 4. Copiar el código fuente
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NLTK_DATA=/app/nltk_data
+
+WORKDIR /app
+COPY --from=builder /install /usr/local
 COPY . .
+RUN python -m nltk.downloader -d /app/nltk_data stopwords \
+    && rm -rf /root/.cache/pip
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8083"]

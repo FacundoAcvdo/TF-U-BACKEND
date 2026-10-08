@@ -1,20 +1,32 @@
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    && ln -sf /usr/bin/python3 /usr/bin/python \
-    && pip3 install --no-cache-dir --upgrade pip \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
-RUN python3 -c "import nltk; nltk.download('stopwords')"
-# torch GPU (RTX 3070) - si falla queda CPU
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cu121 "torch" || echo "torch GPU no instalado - fallback CPU"
+# torch CPU primero; filtramos "torch" de requirements para no reinstalar la variante CUDA de PyPI
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install torch --index-url https://download.pytorch.org/whl/cpu && \
+    tr -d '\r' < requirements.txt | grep -viE '^torch($|[[ =<>;])' > /tmp/req-no-torch.txt && \
+    pip install --prefix=/install -r /tmp/req-no-torch.txt
 
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NLTK_DATA=/app/nltk_data
+
+WORKDIR /app
+COPY --from=builder /install /usr/local
 COPY . .
+RUN python -c "import nltk; nltk.download('stopwords', download_dir='/app/nltk_data')" \
+    && rm -rf /root/.cache/pip
 
 EXPOSE 8090
 
