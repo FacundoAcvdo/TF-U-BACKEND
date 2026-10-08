@@ -70,7 +70,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-origins = ["http://localhost:8080"]
+origins = os.environ.get("CORS_ORIGINS").split(",")
 
 app.add_middleware(
     CORSMiddleware,
