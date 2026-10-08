@@ -33,6 +33,7 @@ FUENTE_POR_SECCION = {
     "topicos": "topicos",
     "chats": "chats",
     "riesgo": "riesgo",
+    "sentimiento": "sentimiento",
 }
 
 
@@ -147,6 +148,20 @@ def filas_riesgo(supabase, user_id: str, dataset_id: str):
                      "skipped_sin_embedding,verificados_b,top_items,disclaimer")
 
 
+def filas_sentimiento(supabase, user_id: str, dataset_id: str) -> list[dict]:
+    try:
+        respuesta = (
+            supabase.table("emotions_evolution_results")
+            .select("remitente,modo,cantidad_mensajes,payload,updated_at")
+            .eq("dataset_id", dataset_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return respuesta.data or []
+    except Exception:
+        return []
+
+
 def filas_evolucion(supabase, user_id: str, dataset_id: str) -> list[dict]:
     try:
         respuesta = (
@@ -177,6 +192,7 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
     tops = filas_topicos(supabase, user_id, dataset_id)
     rac = filas_chats(supabase, user_id, dataset_id)
     rgo = filas_riesgo(supabase, user_id, dataset_id)
+    sen = filas_sentimiento(supabase, user_id, dataset_id)
 
     detalles = {
         "estadisticas": "Resumen descriptivo del corpus y distribución por clase." if eda else "",
@@ -209,6 +225,12 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
             f"{res.get('total', '?')} casos, "
             f"{res.get('pct_alto_potencial', '?')}% alto/potencial."
         )
+    if sen:
+        remitentes = sorted({str(f.get("remitente", "?")) for f in sen})
+        detalles["sentimiento"] = (
+            f"{len(sen)} análisis guardados "
+            f"({', '.join(remitentes[:3])}{'...' if len(remitentes) > 3 else ''})."
+        )
 
     disponibles = {
         "estadisticas": eda is not None,
@@ -219,6 +241,7 @@ def inventario(supabase, dataset_name: str, user_id: str) -> dict:
         "topicos": tops is not None,
         "chats": rac is not None,
         "riesgo": rgo is not None,
+        "sentimiento": len(sen) > 0,
     }
 
     secciones = []
@@ -258,6 +281,8 @@ def leer_fuente(supabase, seccion_id: str, dataset_name: str, user_id: str, data
         return filas_chats(supabase, user_id, dataset_id)
     if seccion_id == "riesgo":
         return filas_riesgo(supabase, user_id, dataset_id)
+    if seccion_id == "sentimiento":
+        return {"filas": filas_sentimiento(supabase, user_id, dataset_id)}
     if seccion_id == "evolucion":
         try:
             respuesta = (

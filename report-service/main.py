@@ -149,6 +149,8 @@ def specs_para_fuente(sid: str, fuente: dict) -> list[dict]:
                 s = spec_lineas(f"Evolución — {fila.get('remitente', '?')}", series)
                 if s:
                     specs.append(s)
+        elif sid == "sentimiento":
+            pass
         elif sid == "embeddings":
             puntos = []
             clusters = []
@@ -488,6 +490,58 @@ def construir_riesgo(d: dict) -> dict:
     return out
 
 
+EMOCION_ES = {
+    "anger": "Enojo",
+    "disgust": "Disgusto",
+    "fear": "Miedo",
+    "joy": "Alegría",
+    "sadness": "Tristeza",
+    "surprise": "Sorpresa",
+}
+
+
+def construir_sentimiento(d: dict) -> dict:
+    metricas: list[tuple[str, str]] = []
+    tablas_datos = []
+    for fila in d.get("filas", []) or []:
+        payload = fila.get("payload") or {}
+        periodos = payload.get("periodos") or payload.get("bloques") or []
+        nombre = f"{fila.get('remitente', '?')} ({fila.get('modo', '?')})"
+        metricas.append((f"Análisis {nombre}",
+                         f"{len(periodos)} periodos/bloques · {fila.get('cantidad_mensajes', '?')} mensajes"))
+        filas_tabla = []
+        nombres = [str(e) for e in (payload.get("emotions") or [])]
+        if not nombres:
+            vistos: list[str] = []
+            for per in periodos:
+                emos = per.get("emotions") or {}
+                if isinstance(emos, dict):
+                    for k in emos:
+                        if str(k) not in vistos:
+                            vistos.append(str(k))
+            nombres = vistos
+        for per in periodos:
+            emos = per.get("emotions") or {}
+            fila_per = [str(per.get("etiqueta", "?"))]
+            for emo in nombres:
+                try:
+                    fila_per.append(f"{float((emos or {}).get(emo, 0) or 0) * 100:.1f}%")
+                except (TypeError, ValueError):
+                    fila_per.append("—")
+            filas_tabla.append(fila_per)
+        if filas_tabla:
+            tablas_datos.append((f"Emociones por período — {nombre}",
+                                 ["Periodo"] + [EMOCION_ES.get(e, str(e)) for e in nombres],
+                                 filas_tabla))
+    return {
+        "titulo": "Sentimiento en el tiempo",
+        "descripcion": "Evolución de emociones por período/bloque.",
+        "metricas": metricas,
+        "graficos": [],
+        "tablas_datos": tablas_datos,
+    }
+
+
 def construir_evolucion(d: dict) -> dict:
     metricas: list[tuple[str, str]] = []
     tablas_datos = []
@@ -551,6 +605,7 @@ CONSTRUCTORES = {
     "topicos": construir_topicos,
     "chats": construir_chats,
     "riesgo": construir_riesgo,
+    "sentimiento": construir_sentimiento,
 }
 
 
