@@ -4,8 +4,45 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import pandas as pd
+import polars as pl
 
-from models import Documento
+from models import Document
+
+
+def _normalizar_fechas_a_iso(
+    serie: pd.Series,
+    formato_fecha: str | None,
+) -> list[str | None]:
+    """Normaliza una columna entera de fechas a YYYY-MM-DD (vectorizado).
+
+    Respeta formato_fecha DMY/MDY/YMD para valores con '/'.
+    Lanza ValueError si algún valor no vacío es inválido (fail-fast,
+    igual que el parseo por fila anterior).
+    """
+    # dayfirst según formato: DMY (o sin formato) -> True; MDY/YMD -> False.
+    # Para YMD con '/', pandas ya interpreta año primero; dayfirst no afecta.
+    dayfirst = formato_fecha in (None, "DMY")
+
+    original = serie.astype(object)
+    vacia = original.isna() | (original.astype(str).str.strip() == "")
+
+    parsed = pd.to_datetime(
+        serie, errors="coerce", format="mixed", dayfirst=dayfirst
+    )
+
+    invalidas = ~vacia & parsed.isna()
+    if invalidas.any():
+        ejemplos = (
+            original[invalidas].astype(str).str.slice(0, 40).unique()[:3]
+        )
+        raise ValueError(
+            "Fechas inválidas "
+            f"(formatoFecha={formato_fecha}): "
+            f"{list(ejemplos)}"
+        )
+
+    iso = parsed.dt.strftime("%Y-%m-%d")
+    return [None if v else f for v, f in zip(vacia.tolist(), iso.tolist())]
 
 
 class BaseDocumentParser(ABC):
@@ -17,8 +54,10 @@ class BaseDocumentParser(ABC):
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+        formato_fecha: str | None = None,
+    ) -> list[Document]:
 
         raise NotImplementedError
 
@@ -34,7 +73,9 @@ class DataFrameParser(
         columna_clase: str | None,
         columna_fecha: str | None,
         extra_metadata: dict[str, Any] | None,
-    ) -> list[Documento]:
+        columna_autor: str | None = None,
+        formato_fecha: str | None = None,
+    ) -> list[Document]:
 
         if columna_texto not in df.columns:
 
@@ -75,24 +116,47 @@ class DataFrameParser(
                 columna_fecha
             )
 
+        if columna_autor:
+
+            if columna_autor not in df.columns:
+
+                raise ValueError(
+                    f"La columna de autor "
+                    f"'{columna_autor}' no existe."
+                )
+
+            columnas_mapeadas.add(
+                columna_autor
+            )
+
         columnas_extra = [
             column
             for column in df.columns
             if column not in columnas_mapeadas
         ]
 
-        documents: list[Documento] = []
+        # Fechas normalizadas una sola vez por columna (vectorizado),
+        # no una conversión por fila.
+        fechas_iso: list[str | None] | None = None
+        if columna_fecha:
+            fechas_iso = _normalizar_fechas_a_iso(
+                df[columna_fecha], formato_fecha
+            )
 
-        for index, row in df.iterrows():
+        # Registros como dicts (sin el overhead de Series por fila
+        # que impone df.iterrows()).
+        registros = df.to_dict(orient="records")
 
-            raw_text = row[columna_texto]
+        documents: list[Document] = []
 
-            if pd.isna(raw_text):
+        for i, row in enumerate(registros):
+
+            raw_text = row.get(columna_texto)
+
+            if raw_text is None or (isinstance(raw_text, float) and pd.isna(raw_text)):
                 continue
 
-            text = str(
-                raw_text
-            ).strip()
+            text = str(raw_text).strip()
 
             if not text:
                 continue
@@ -101,10 +165,16 @@ class DataFrameParser(
 
             for column in columnas_extra:
 
-                value = row[column]
+                value = row.get(column)
 
-                if pd.isna(value):
+                if value is None or (isinstance(value, float) and pd.isna(value)):
                     continue
+
+                try:
+                    if pd.isna(value):
+                        continue
+                except (TypeError, ValueError):
+                    pass
 
                 metadata[column] = value
 
@@ -118,31 +188,44 @@ class DataFrameParser(
 
             if columna_clase:
 
-                value = row[
-                    columna_clase
-                ]
+                value = row.get(columna_clase)
 
-                if not pd.isna(value):
+                if value is not None and not (
+                    isinstance(value, float) and pd.isna(value)
+                ):
+                    try:
+                        es_nan = pd.isna(value)
+                    except (TypeError, ValueError):
+                        es_nan = False
 
-                    clase = str(value)
+                    if not es_nan:
+                        clase = str(value)
 
-            fecha = None
+            fecha = fechas_iso[i] if fechas_iso is not None else None
 
-            if columna_fecha:
+            autor = None
 
-                value = row[
-                    columna_fecha
-                ]
+            if columna_autor:
 
-                if not pd.isna(value):
+                value = row.get(columna_autor)
 
-                    fecha = str(value)
+                if value is not None and not (
+                    isinstance(value, float) and pd.isna(value)
+                ):
+                    try:
+                        es_nan = pd.isna(value)
+                    except (TypeError, ValueError):
+                        es_nan = False
+
+                    if not es_nan and str(value).strip():
+                        autor = str(value).strip()
 
             documents.append(
-                Documento(
+                Document(
                     texto=text,
                     clase=clase,
                     fecha=fecha,
+                    autor=autor,
                     metadata=metadata,
                 )
             )
@@ -167,8 +250,10 @@ class CSVParser(
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+        formato_fecha: str | None = None,
+    ) -> list[Document]:
 
         df = self._leer_csv(content)
 
@@ -178,40 +263,57 @@ class CSVParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            columna_autor=columna_autor,
+            formato_fecha=formato_fecha,
         )
 
     def _leer_csv(
         self,
         content: bytes,
     ) -> pd.DataFrame:
-
         ultimo_error: Exception | None = None
 
         for encoding in self.ENCODINGS_A_PROBAR:
-
             try:
+                if encoding.lower() in ("utf-8", "utf8"):
+                    df_pl = pl.read_csv(
+                        io.BytesIO(content),
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        truncate_ragged_lines=True,
+                    )
+                else:
+                    texto = content.decode(encoding)
+                    df_pl = pl.read_csv(
+                        io.StringIO(texto),
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        truncate_ragged_lines=True,
+                    )
 
-                return pd.read_csv(
-                    io.BytesIO(content),
-                    sep=None,
-                    engine="python",
-                    dtype=str,
-                    encoding=encoding,
+                nuevas_columnas = {
+                    col: f"unnamed_{i}"
+                    for i, col in enumerate(df_pl.columns)
+                    if not col or not col.strip()
+                }
+                if nuevas_columnas:
+                    df_pl = df_pl.rename(nuevas_columnas)
+
+                return (
+                    df_pl.to_pandas()
+                    if hasattr(df_pl, "to_pandas")
+                    else pd.DataFrame(df_pl.to_dicts())
                 )
 
             except UnicodeDecodeError as exc:
-
+                ultimo_error = exc
+                continue
+            except Exception as exc:
                 ultimo_error = exc
                 continue
 
-            except Exception as exc:
-                raise ValueError(f"No se pudo leer el CSV: {exc}") from exc
-
         raise ValueError(
-            "No se pudo leer el CSV: no se "
-            "reconoce la codificación del "
-            "archivo "
-            f"(último error: {ultimo_error})"
+            f"No se pudo leer el CSV: no se reconoce la codificación (último error: {ultimo_error})"
         )
 
 
@@ -225,8 +327,10 @@ class XLSXParser(
         columna_texto: str,
         columna_clase: str | None = None,
         columna_fecha: str | None = None,
+        columna_autor: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> list[Documento]:
+        formato_fecha: str | None = None,
+    ) -> list[Document]:
 
         try:
             df = pd.read_excel(
@@ -246,6 +350,8 @@ class XLSXParser(
             columna_clase=columna_clase,
             columna_fecha=columna_fecha,
             extra_metadata=extra_metadata,
+            columna_autor=columna_autor,
+            formato_fecha=formato_fecha,
         )
 
 

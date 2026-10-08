@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+supabase
+storage3
+
+chromadb>=0.5.5

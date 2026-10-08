@@ -55,6 +55,10 @@ class SupabaseRepository:
         user_id: str,
         filename: str,
         user_token: str,
+        dataset_size=int,
+        embedding_size=int,
+        embedding_chunked_size=int,
+        tipo: str = "dataset",
     ) -> None:
         
         supabase = self.get_supabase_client(user_token)
@@ -63,6 +67,10 @@ class SupabaseRepository:
             "dataset_id": dataset_id,
             "user_id": user_id,
             "dataset_name": filename,
+            "dataset_size": dataset_size,
+            "embedding_size": embedding_size,
+            "embedding_chunked_size": embedding_chunked_size,
+            "tipo": tipo,
         }
 
         try: 
@@ -125,74 +133,76 @@ class SupabaseRepository:
 
     async def delete_dataset(
         self,
+        *,
         dataset_id: str,
         user_id: str,
+        user_token: str,
     ) -> None:
 
-        url = (
-            f"{self.base_url}/rest/v1/"
-            f"{self.table}"
+        supabase = self.get_supabase_client(
+            user_token
         )
 
-        params = {
-            "id": f"eq.{dataset_id}",
-            "user_id": f"eq.{user_id}",
-        }
+        try:
 
-        async with httpx.AsyncClient(
-            timeout=5.0
-        ) as client:
-
-            response = await client.delete(
-                url,
-                headers=self.headers,
-                params=params,
+            (
+                supabase
+                .table(self.table)
+                .delete()
+                .eq("dataset_id", dataset_id)
+                .eq("user_id", user_id)
+                .execute()
             )
 
-        if response.status_code >= 400:
+        except Exception as e:
 
             raise RuntimeError(
                 "No se pudo eliminar el dataset "
                 "de Supabase."
-            )
+                f" Error: {e}"
+            ) from e
 
-    async def get_dataset(
+    async def delete_datasets_by_user(
         self,
-        dataset_id: str,
         user_id: str,
-    ) -> dict[str, Any] | None:
+        user_token: str,
+    ) -> None:
 
-        url = (
-            f"{self.base_url}/rest/v1/"
-            f"{self.table}"
+        supabase = self.get_supabase_client(
+            user_token
         )
 
-        params = {
-            "id": f"eq.{dataset_id}",
-            "user_id": f"eq.{user_id}",
-            "select": "*",
-        }
+        try:
 
-        async with httpx.AsyncClient(
-            timeout=5.0
-        ) as client:
-
-            response = await client.get(
-                url,
-                headers=self.headers,
-                params=params,
+            (
+                supabase
+                .table(self.table)
+                .delete()
+                .eq("user_id", user_id)
+                .execute()
             )
 
-        if response.status_code >= 400:
+        except Exception as e:
 
             raise RuntimeError(
-                "No se pudo consultar el dataset "
-                "en Supabase."
-            )
+                "No se pudieron eliminar los datasets "
+                "del usuario de Supabase."
+                f" Error: {e}"
+            ) from e
 
-        rows = response.json()
+    async def get_datasets_by_user(
+        self,
+        user_id: str,
+        user_token: str,
+    ) -> list[dict[str, Any]]:
 
-        if not rows:
-            return None
+        supabase = self.get_supabase_client(user_jwt=user_token)
 
-        return rows[0]
+        response = (
+            supabase.table("datasets")
+            .select("*")
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+        return response.data

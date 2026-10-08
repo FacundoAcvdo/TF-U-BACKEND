@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+supabase
+
+pandas
+openpyxl
+
+emoji
+spacy
+langdetect
+nltk
+chromadb>=0.5.5

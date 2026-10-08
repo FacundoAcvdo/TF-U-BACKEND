@@ -1,0 +1,22 @@
+{
+  "accuracy": 0.9383334638169054,
+  "f1": 0.9384041915387222,
+  "precision": 0.9383308137413334,
+  "recall": 0.9384775808133472,
+  "n_train": 153275,
+  "n_test": 38319,
+  "embedding_model": "intfloat/multilingual-e5-large",
+  "embedding_dim": 1024,
+  "dataset": "vibhorag101/suicide_prediction_dataset_phr",
+  "extra_csv": [
+    "/train/es_data/suicide_es_train.parquet"
+  ],
+  "date": "2026-10-06T22:46:14.406582+00:00",
+  "es_test": {
+    "n": 2000,
+    "accuracy": 0.92,
+    "f1": 0.9202392821535393,
+    "precision": 0.9174950298210736,
+    "recall": 0.923
+  }
+}

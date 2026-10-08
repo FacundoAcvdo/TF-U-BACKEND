@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+numpy
+pydantic
+supabase
+chromadb
+nltk
+transformers
+torch
+accelerate

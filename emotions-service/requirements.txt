@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+scikit-learn
+supabase
+storage3
+transformers
+torch
+accelerate
+sentencepiece
+nltk
+
+chromadb>=0.5.5

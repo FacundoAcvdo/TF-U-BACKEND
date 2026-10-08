@@ -10,7 +10,6 @@ class Settings(BaseSettings):
 
     internal_service_token: str = ""
 
-    dataset_storage_path: str = "/data/datasets"
     max_upload_size_mb: int = 50
 
     supabase_url: str = ""
@@ -22,9 +21,18 @@ class Settings(BaseSettings):
     chroma_port: int = 0
     chroma_token: str = ""
     chroma_collection_name: str = "documents"
+    chroma_chunked_collection_name: str = "chunked_chats"
 
     embedding_provider: str = "none"
-    embedding_model: str = ""
+    embedding_model: str = "intfloat/multilingual-e5-large"
+    embedding_batch_size: int = 64
+    embedding_device: str = "auto"
+    embedding_fp16: bool = True
+
+    ingest_chunk_size: int = 2000
+
+    chat_chunk_size: int = 20
+    chat_chunk_overlap: int = 4
 
     model_config = SettingsConfigDict(
         env_file=".env",
