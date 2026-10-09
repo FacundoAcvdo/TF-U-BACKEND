@@ -14,7 +14,6 @@ class TrainingRequest(BaseModel):
     ] = "Logistic Regression"
     modo: Literal["validacion_cruzada", "porcentajes"]
     k: Optional[int] = 5
-    porcentaje_entrenamiento: Optional[int] = 50
     porcentaje_prueba: Optional[int] = 50
     hiperparametros: Optional[Dict[str, Any]] = None
 
