@@ -424,7 +424,6 @@ def get_tokenizer(model_name: str):
 
 
 def _ajustes_gpu() -> tuple[int, int, bool]:
-    """Batch y fp según la placa: fp16 solo rinde con Tensor Cores (compute >= 7)."""
     try:
         mayor, _ = torch.cuda.get_device_capability(0)
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
