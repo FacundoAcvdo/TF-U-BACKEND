@@ -423,6 +423,18 @@ def get_tokenizer(model_name: str):
     return tok
 
 
+def _ajustes_gpu() -> tuple[int, int, bool]:
+    """Batch y fp según la placa: fp16 solo rinde con Tensor Cores (compute >= 7)."""
+    try:
+        mayor, _ = torch.cuda.get_device_capability(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    except Exception:
+        return 16, 32, True
+    fp16 = mayor >= 7
+    batch = 32 if vram_gb >= 8 else 16
+    return batch, batch * 2, fp16
+
+
 def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
     hiper = getattr(data, "hiperparametros", None) or {}
     pedido = str(hiper.get("bert_modelo", "auto") or "auto").lower()
@@ -470,18 +482,25 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
     epocas = 1 if (modo_rapido or len(textos) < 200) else 2
     temp_dir = tempfile.mkdtemp()
+    bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
+    if DEVICE == "cuda":
+        try:
+            print(f"[classification] GPU {torch.cuda.get_device_name(0)} "
+                  f"batch={bt} fp16={usar_fp16}", flush=True)
+        except Exception:
+            pass
 
     try:
         args_deseados = {
             "output_dir": temp_dir,
             "num_train_epochs": epocas,
-            "per_device_train_batch_size": 16 if DEVICE == "cuda" else 8,
-            "per_device_eval_batch_size": 32 if DEVICE == "cuda" else 16,
+            "per_device_train_batch_size": bt,
+            "per_device_eval_batch_size": be,
             "eval_strategy": "no",
             "evaluation_strategy": "no",
             "save_strategy": "no",
             "use_cpu": DEVICE == "cpu",
-            "fp16": DEVICE == "cuda",
+            "fp16": usar_fp16,
             "group_by_length": True,
             "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
             "dataloader_pin_memory": DEVICE == "cuda",
