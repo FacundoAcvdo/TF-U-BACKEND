@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from data import (
     MODEL_STORAGE_PATH,
     guardar_modelo_en_disco,
     leer_nombre_archivo,
+    limpiar_modelos_antiguos,
     obtener_datos_dataset,
 )
 from schemas import ResumenMenciones, TrainingRequest, TrainingResponse
@@ -23,6 +25,20 @@ from training import (
 
 
 app = FastAPI()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        n = limpiar_modelos_antiguos()
+        if n:
+            print(f"[classification] limpieza inicial: {n} modelo(s) de +24h borrados")
+    except Exception as e:
+        print(f"[classification] limpieza inicial omitida: {e}")
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 origins = ["http://localhost:8080", "http://localhost:3000", "http://127.0.0.1:3000"]
 
@@ -42,6 +58,10 @@ async def detectar_menciones(
     x_user_token: str = Header(..., alias="X-User-Token"),
 ):
     try:
+        try:
+            limpiar_modelos_antiguos()
+        except Exception:
+            pass
         supabase = get_supabase_client(x_user_token)
         response = (
             supabase.table("datasets")

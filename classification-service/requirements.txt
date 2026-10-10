@@ -3,7 +3,6 @@ uvicorn[standard]
 pydantic
 scikit-learn
 numpy
-pandas
 chromadb
 supabase
 transformers>=4.44.0,<4.49.0

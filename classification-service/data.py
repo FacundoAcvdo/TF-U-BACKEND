@@ -8,6 +8,8 @@ import numpy as np
 
 MODEL_STORAGE_PATH = os.environ.get("MODEL_STORAGE_PATH", "/app/data/modelos")
 
+MODEL_TTL_HOURS = float(os.environ.get("MODEL_TTL_HOURS", 24))
+
 MODEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -82,3 +84,31 @@ def leer_nombre_archivo(model_id: str) -> str:
     except OSError:
         pass
     return f"{model_id}.zip"
+
+
+def limpiar_modelos_antiguos(max_horas: float | None = None) -> int:
+    """Borra zips (y su .name) con más de `max_horas` de antigüedad. TTL por defecto 24h."""
+    import time
+    limite = MODEL_TTL_HOURS if max_horas is None else max_horas
+    try:
+        entradas = os.listdir(MODEL_STORAGE_PATH)
+    except OSError:
+        return 0
+    ahora = time.time()
+    borrados = 0
+    for nombre in entradas:
+        if not nombre.endswith(".zip"):
+            continue
+        ruta = os.path.join(MODEL_STORAGE_PATH, nombre)
+        try:
+            if ahora - os.path.getmtime(ruta) < limite * 3600:
+                continue
+            os.remove(ruta)
+            borrados += 1
+        except OSError:
+            continue
+        try:
+            os.remove(os.path.join(MODEL_STORAGE_PATH, nombre[:-4] + ".name"))
+        except OSError:
+            pass
+    return borrados

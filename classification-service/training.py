@@ -39,16 +39,49 @@ from schemas import TrainingRequest
 
 MAX_CLASES = int(os.environ.get("MAX_CLASES", 7))
 
-def instanciar_clasificador_sklearn(nombre: str):
+def _flotante(v, default: float, lo: float, hi: float) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, f))
+
+
+def _entero(v, default: int, lo: int, hi: int) -> int:
+    try:
+        i = int(float(v))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, i))
+
+
+def instanciar_clasificador_sklearn(nombre: str, hiper: dict | None = None):
+    hiper = hiper or {}
     if nombre == "Support Vector Machine":
-        return LinearSVC(random_state=42, max_iter=3000, class_weight="balanced")
+        c = _flotante(hiper.get("C"), 1.0, 0.01, 100.0)
+        mi = _entero(hiper.get("max_iter"), 3000, 100, 10000)
+        return (LinearSVC(random_state=42, max_iter=mi, class_weight="balanced", C=c),
+                {"C": c, "max_iter": mi})
     if nombre == "Random Forest":
-        return RandomForestClassifier(
-            n_estimators=100, random_state=42, class_weight="balanced", n_jobs=-1
-        )
+        ne = _entero(hiper.get("n_estimators"), 100, 10, 1000)
+        md_raw = hiper.get("max_depth", None)
+        if md_raw in (None, "", "auto", "null", "None"):
+            md = None
+        else:
+            md = _entero(md_raw, 0, 2, 100)
+            md = None if md == 0 else md
+        msl = _entero(hiper.get("min_samples_leaf"), 1, 1, 10)
+        return (RandomForestClassifier(
+            n_estimators=ne, max_depth=md, min_samples_leaf=msl,
+            random_state=42, class_weight="balanced", n_jobs=-1,
+        ), {"n_estimators": ne, "max_depth": md, "min_samples_leaf": msl})
     if nombre == "Naive Bayes":
-        return GaussianNB()
-    return LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")
+        vs = _flotante(hiper.get("var_smoothing"), 1e-9, 1e-12, 1e-3)
+        return GaussianNB(var_smoothing=vs), {"var_smoothing": vs}
+    c = _flotante(hiper.get("C"), 1.0, 0.01, 100.0)
+    mi = _entero(hiper.get("max_iter"), 1000, 100, 5000)
+    return (LogisticRegression(max_iter=mi, random_state=42, class_weight="balanced", C=c),
+            {"C": c, "max_iter": mi})
 
 
 def procesar_etiquetas_automatico(valores_raw: list[str]):
@@ -192,7 +225,7 @@ def calcular_metricas(y_true, y_pred, cantidad_clases: int):
 def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
     total_muestras = len(y_labels)
     cantidad_clases = len(clases_nombres)
-    clf = instanciar_clasificador_sklearn(data.modelo)
+    clf, hiper_usados = instanciar_clasificador_sklearn(data.modelo, data.hiperparametros)
 
     if data.modo == "validacion_cruzada":
         k_folds = data.k if data.k in [5, 10] else 5
@@ -246,11 +279,13 @@ def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: T
         "f1_score": f1,
         "precision": prec,
         "recall": rec,
+        "hiperparametros": hiper_usados,
     }
     torch.save(checkpoint, checkpoint_buffer)
     checkpoint_buffer.seek(0)
 
     fecha = datetime.now(timezone.utc).isoformat()
+    hiper_lineas = "\n".join(f"- `{k}`: **{v}**" for k, v in hiper_usados.items())
     mapping_lines = "\n".join(
         f"- `{clase}` → `{idx}`"
         for clase, idx in label_mapping.items()
@@ -283,6 +318,10 @@ def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: T
 - F1-score weighted: **{f1:.4f}**
 - Precision weighted: **{prec:.4f}**
 - Recall weighted: **{rec:.4f}**
+
+## Hiperparámetros
+
+{hiper_lineas}
 
 ## Mapeo de clases
 
@@ -351,11 +390,63 @@ class TextDataset(torch.utils.data.Dataset):
         return len(self.labels)
 
 
+MODELOS_BERT = {
+    "es": "dccuchile/distilbert-base-spanish-uncased",
+    "en": "distilbert-base-uncased",
+    "es_base": "dccuchile/bert-base-spanish-wwm-uncased",
+}
+
+_TOKENIZERS: dict = {}
+
+_MARCAS_ES = (" que ", " de ", " la ", " el ", " en ", " una ", " para ",
+              " con ", " los ", " del ", " no ", " por ", " este ", " esta ")
+_MARCAS_EN = (" the ", " and ", " to ", " of ", " you ", " that ", " with ",
+              " for ", " this ", " are ", " was ", " have ", " not ")
+
+
+def detectar_idioma(textos: list[str], muestra: int = 100) -> str:
+    pts_es = pts_en = 0
+    for t in (textos or [])[:max(1, muestra)]:
+        s = f" {(t or '').lower()} "
+        if "ñ" in s or "á" in s or "é" in s or "í" in s or "ó" in s or "ú" in s or "¿" in s or "¡" in s:
+            pts_es += 2
+        pts_es += sum(1 for m in _MARCAS_ES if m in s)
+        pts_en += sum(1 for m in _MARCAS_EN if m in s)
+    return "en" if pts_en > pts_es else "es"
+
+
+def get_tokenizer(model_name: str):
+    tok = _TOKENIZERS.get(model_name)
+    if tok is None:
+        tok = AutoTokenizer.from_pretrained(model_name)
+        _TOKENIZERS[model_name] = tok
+    return tok
+
+
+def _ajustes_gpu() -> tuple[int, int, bool]:
+    try:
+        mayor, _ = torch.cuda.get_device_capability(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    except Exception:
+        return 16, 32, True
+    fp16 = mayor >= 7
+    batch = 32 if vram_gb >= 8 else 16
+    return batch, batch * 2, fp16
+
+
 def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
-    model_name = "dccuchile/bert-base-spanish-wwm-uncased"
+    hiper = getattr(data, "hiperparametros", None) or {}
+    pedido = str(hiper.get("bert_modelo", "auto") or "auto").lower()
+    if pedido in ("es", "en", "es_base"):
+        idioma = pedido if pedido in ("es", "en") else "es"
+        model_name = MODELOS_BERT[pedido]
+    else:
+        idioma = detectar_idioma(textos)
+        model_name = MODELOS_BERT.get(idioma, MODELOS_BERT["es"])
+    modo_rapido = bool(hiper.get("bert_rapido", False))
     cantidad_clases = len(clases_nombres)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = get_tokenizer(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
         num_labels=cantidad_clases,
@@ -363,6 +454,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         label2id={k: int(v) for k, v in label_mapping.items()},
     )
     model.to(DEVICE)
+    if modo_rapido:
+        for n, p in model.named_parameters():
+            if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
+                p.requires_grad = False
 
     test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
 
@@ -374,26 +469,37 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         random_state=42,
     )
 
-    train_encodings = tokenizer(x_train, truncation=True, max_length=128)
-    test_encodings = tokenizer(x_test, truncation=True, max_length=128)
+    largos = sorted(len(t or "") for t in (x_train + x_test)) if (x_train + x_test) else [0]
+    p90 = largos[min(len(largos) - 1, int(len(largos) * 0.9))]
+    max_len = 64 if p90 < 250 else 128
+    train_encodings = tokenizer(x_train, truncation=True, max_length=max_len)
+    test_encodings = tokenizer(x_test, truncation=True, max_length=max_len)
 
     train_dataset = TextDataset(train_encodings, y_train)
     test_dataset = TextDataset(test_encodings, y_test)
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
+    epocas = 1 if (modo_rapido or len(textos) < 200) else 2
     temp_dir = tempfile.mkdtemp()
+    bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
+    if DEVICE == "cuda":
+        try:
+            print(f"[classification] GPU {torch.cuda.get_device_name(0)} "
+                  f"batch={bt} fp16={usar_fp16}", flush=True)
+        except Exception:
+            pass
 
     try:
         args_deseados = {
             "output_dir": temp_dir,
-            "num_train_epochs": 2,
-            "per_device_train_batch_size": 16 if DEVICE == "cuda" else 4,
-            "per_device_eval_batch_size": 32 if DEVICE == "cuda" else 8,
+            "num_train_epochs": epocas,
+            "per_device_train_batch_size": bt,
+            "per_device_eval_batch_size": be,
             "eval_strategy": "no",
             "evaluation_strategy": "no",
             "save_strategy": "no",
             "use_cpu": DEVICE == "cpu",
-            "fp16": DEVICE == "cuda",
+            "fp16": usar_fp16,
             "group_by_length": True,
             "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
             "dataloader_pin_memory": DEVICE == "cuda",
@@ -453,6 +559,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
 - Dataset: **{data.dataset}**
 - Arquitectura base: **{model_name}**
+- Idioma detectado: **{idioma}**
+- Modo: **{"rápido (encoder congelado)" if modo_rapido else "completo"}**
+- Épocas: **{epocas}**
+- Max length: **{max_len}**
 - Fecha: **{fecha}**
 - Cantidad de clases: **{cantidad_clases}**
 
@@ -489,7 +599,7 @@ inputs = tokenizer(
     return_tensors="pt",
     padding=True,
     truncation=True,
-    max_length=128,
+    max_length={max_len},
 )
 
 with torch.no_grad():
