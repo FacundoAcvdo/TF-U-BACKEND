@@ -31,7 +31,7 @@ SERVICES = {
 
 @app.post("/auth/login")
 async def login_proxy(request: Request, response: Response):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=None) as client:
         upstream = await client.post(
             os.getenv("AUTH_SERVICE_URL") + "/auth/login",
             json=await request.json(),
