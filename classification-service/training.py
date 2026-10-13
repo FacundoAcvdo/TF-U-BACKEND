@@ -513,13 +513,18 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
         training_args = TrainingArguments(**args_filtrados)
 
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=test_dataset,
-            data_collator=collator,
-        )
+        trainer_kwargs = {
+            "model": model,
+            "args": training_args,
+            "train_dataset": train_dataset,
+            "eval_dataset": test_dataset,
+            "data_collator": collator,
+        }
+        if "processing_class" in set(inspect.signature(Trainer.__init__).parameters):
+            trainer_kwargs["processing_class"] = tokenizer
+        else:
+            trainer_kwargs["tokenizer"] = tokenizer
+        trainer = Trainer(**trainer_kwargs)
 
         trainer.train()
 

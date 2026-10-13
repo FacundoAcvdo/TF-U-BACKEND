@@ -1,7 +1,7 @@
-import time
-import uuid
 import asyncio
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -20,7 +20,6 @@ from data import (
 )
 from schemas import ResumenMenciones, TrainingRequest, TrainingResponse
 from training import (
-
     entrenar_bert,
     entrenar_sklearn,
     procesar_etiquetas_automatico,
@@ -29,6 +28,7 @@ from training import (
 import logging
 from logging_utils import setup_service_logger
 import jobs
+
 logger = setup_service_logger("classification-service")
 
 
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     try:
         n = limpiar_modelos_antiguos()
         if n:
-            pass
+            logger.info(f"[classification] limpieza inicial: {n} modelo(s) de +24h borrados")
     except Exception as e:
         logger.warning(f"[classification] limpieza inicial omitida: {e}")
     yield
@@ -103,7 +103,7 @@ async def start_detectar_menciones(
     except Exception as e:
         logger.exception(f"[classification] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
-    background_tasks.add_task(_run_classification_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    background_tasks.add_task(_run_classification_job, job["job_id"], jsonable_encoder(data), x_user_id, x_user_token)
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
@@ -120,7 +120,7 @@ async def _run_classification_job(job_id: str, payload: dict, user_id: str, user
         logger.exception(f"[classification] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
         jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
         return
-    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result, mode="json"))
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
 
 
 @app.get("/jobs/{job_id}")
@@ -150,8 +150,8 @@ async def list_active_jobs(
 
 async def _compute_detectar_menciones(
     data: TrainingRequest,
-    x_user_id: str = Header(..., alias="X-User-ID"),
-    x_user_token: str = Header(..., alias="X-User-Token"),
+    x_user_id: str,
+    x_user_token: str,
 ):
     try:
         try:
@@ -252,7 +252,7 @@ async def _compute_detectar_menciones(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"[classification] fallo en detectar_menciones | method=POST causa={type(e).__name__}: {e}")
+        logger.exception(f"[classification] fallo en detectar_menciones | causa={type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 

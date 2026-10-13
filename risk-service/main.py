@@ -1,7 +1,6 @@
+from __future__ import annotations
 import time
 import uuid
-"""Suicide-risk service: opción A (E5+LogReg) siempre, opción B (RoBERTa) solo alto+EN."""
-from __future__ import annotations
 
 import asyncio
 from collections import Counter

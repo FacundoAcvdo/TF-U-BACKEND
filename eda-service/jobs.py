@@ -76,6 +76,7 @@ def _public_row(row: dict) -> dict:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
         "finished_at": row.get("finished_at"),
+        "params": row.get("params"),
     }
 
 

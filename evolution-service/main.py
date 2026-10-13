@@ -1,8 +1,10 @@
 import time
 import uuid
+import asyncio
 import os
 import re
 from collections import Counter
+from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 import chromadb
@@ -15,7 +17,7 @@ from supabase import create_client
 import nltk
 from nltk.corpus import stopwords
 
-from emotions import EMOTIONS, predecir_emociones_textos, promediar_emociones
+from emotions import EMOTIONS, get_emotion_pipeline, predecir_emociones_textos, promediar_emociones
 import logging
 from logging_utils import setup_service_logger
 import jobs
@@ -71,7 +73,15 @@ TABLA_CACHE_EMOCIONES = "emotions_evolution_results"
 
 OBJETIVO_BLOQUES = 10
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        await asyncio.to_thread(get_emotion_pipeline)
+    except Exception as e:
+        logger.warning(f"[evolution-service] warmup pipeline emociones fallo (seguira lazy en primera request): {e}")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 origins = ["http://localhost:8080", "http://localhost:3000", "http://127.0.0.1:3000",]
 
