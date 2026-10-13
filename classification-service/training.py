@@ -348,10 +348,10 @@ embeddings = encoder.encode(textos, normalize_embeddings=True)
 prediccion_id = clf.predict(embeddings)
 
 for texto, clase_id in zip(textos, prediccion_id):
-    print(texto, "->", checkpoint["clases_nombres"][int(clase_id)])
+    prediccion = (texto, checkpoint["clases_nombres"][int(clase_id)])
 
 # Matriz guardada en el checkpoint:
-print(checkpoint["matriz_confusion"])
+matriz = checkpoint["matriz_confusion"]
 ```
 
 ## Dependencias
@@ -484,8 +484,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
     bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
     if DEVICE == "cuda":
         try:
-            print(f"[classification] GPU {torch.cuda.get_device_name(0)} "
-                  f"batch={bt} fp16={usar_fp16}", flush=True)
+            pass
         except Exception:
             pass
 
@@ -588,6 +587,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 ```python
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("classification-service")
+
 
 ruta_modelo = "./modelo_bert"
 tokenizer = AutoTokenizer.from_pretrained(ruta_modelo)
@@ -608,7 +611,7 @@ with torch.no_grad():
 
 for texto, clase_id in zip(textos, predicciones):
     clase_id = int(clase_id)
-    print(texto, "->", model.config.id2label[clase_id])
+    prediccion = (texto, model.config.id2label[clase_id])
 ```
 
 ## Dependencias

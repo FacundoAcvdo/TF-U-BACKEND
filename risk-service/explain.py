@@ -42,7 +42,6 @@ def _norm(s: str) -> str:
     return s
 
 
-# Índice normalizado -> original para mapear offsets
 _NORM_TRIGGERS = [(_norm(t), t) for t in TRIGGERS_ES + TRIGGERS_EN]
 
 
@@ -70,7 +69,7 @@ def find_triggers(text: str) -> list[dict]:
     for norm_t, orig_t in _NORM_TRIGGERS:
         idx = norm_text.find(norm_t)
         if idx >= 0:
-            # Mapeo aproximado a offsets originales (longitudes similares sin tildes)
+
             hits.append({"trigger": orig_t, "pos_norm": idx})
     return hits
 

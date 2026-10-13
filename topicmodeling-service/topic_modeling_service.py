@@ -3,6 +3,9 @@ from chroma_service import ChromaService
 from supabase_service import SupabaseService
 from title_provider import TitleProvider
 from topic_modeling_provider import TopicModelingProvider
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("topicmodeling-service")
 
 
 class TopicModelingService:
@@ -96,10 +99,9 @@ class TopicModelingService:
                 user_token=user_token,
             )
         except Exception as exc:
-            print(
-                "[TopicModelingService] No se pudo guardar en "
-                f"Supabase: {exc}"
-            )
+            logger.warning("[TopicModelingService] No se pudo guardar en "
+
+                f"Supabase: {exc}")
 
         return resultado
 
@@ -188,6 +190,6 @@ class TopicModelingService:
                 user_token=user_token,
             )
         except Exception as exc:
-            print(f"[TopicModelingService] No se pudo re-grabar caché con títulos: {exc}")
+            logger.exception(f"[TopicModelingService] No se pudo re-grabar caché con títulos: {exc}")
 
         return updated

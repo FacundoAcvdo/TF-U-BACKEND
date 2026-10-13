@@ -3,6 +3,10 @@ from typing import Any
 from supabase import create_client
 
 from config import get_settings
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("cleaning-service")
+
 
 class SupabaseService:
 
@@ -57,11 +61,11 @@ class SupabaseService:
         user_id: str,
         user_token: str,
     ) -> str | None:
-        print(f"Obteniendo dataset '{dataset_name}' para user_id: {user_id}")
+        pass
         supabase = self.get_supabase_client(
             user_jwt=user_token,
         )
-        print(f"Consultando dataset '{dataset_name}' para user_id: {user_id}")
+        pass
         response = (
             supabase
             .table(self.table)

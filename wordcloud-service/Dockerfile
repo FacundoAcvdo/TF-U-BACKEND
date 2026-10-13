@@ -26,4 +26,4 @@ COPY . .
 RUN python -c "import nltk; nltk.download('stopwords', download_dir='/app/nltk_data')" \
     && rm -rf /root/.cache/pip
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8084"]
+CMD ["uvicorn", "--no-access-log", "main:app", "--host", "0.0.0.0", "--port", "8084"]

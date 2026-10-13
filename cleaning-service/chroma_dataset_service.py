@@ -9,7 +9,7 @@ _INTERNAL_METADATA_FIELDS = {
     "formato_detectado",
 }
 
-# Claves internas que Chroma agrega y que no son parte del documento original.
+
 _CHROMA_INTERNAL_KEYS = {
     "dataset_id",
     "user_id",

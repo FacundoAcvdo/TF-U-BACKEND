@@ -1,3 +1,5 @@
+import time
+import uuid
 """Suicide-risk service: opción A (E5+LogReg) siempre, opción B (RoBERTa) solo alto+EN."""
 from __future__ import annotations
 
@@ -6,7 +8,8 @@ from collections import Counter
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -15,26 +18,31 @@ import risk_service
 import verify_service
 from chroma_reader import fetch_paginated
 from supabase_service import (
+
     get_dataset_info,
     get_suicide_results,
     get_supabase_client,
     save_suicide_results,
 )
+import logging
+from logging_utils import setup_service_logger
+import jobs
+logger = setup_service_logger("risk-service")
 
 DISCLAIMER = explain_mod.DISCLAIMER
 TOP_K_DEFAULT = 200
 TOP_K_MAX = 500
-VERIFY_CAP = 200  # máx docs que pasan por RoBERTa por análisis
+VERIFY_CAP = 200
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[risk-service] warmup: cargando risk_model.pkl", flush=True)
+    pass
     try:
         info = await asyncio.to_thread(risk_service.warmup)
-        print(f"[risk-service] modelo OK dim={info['embedding_dim']}", flush=True)
+        pass
     except Exception as e:
-        print(f"[risk-service] warmup fallo (reintenta lazy): {e}", flush=True)
+        logger.exception(f"[risk-service] warmup fallo (reintenta lazy): {e}")
     yield
 
 
@@ -52,7 +60,7 @@ class RiskRequest(BaseModel):
     dataset: str
     with_verification: bool = True
     top_k: int = TOP_K_DEFAULT
-    fuente: str | None = None  # override manual: "mensajes" | "chat"
+    fuente: str | None = None
 
 
 def _summarize(scores: list[float], levels: list[str]) -> dict:
@@ -69,8 +77,95 @@ def _summarize(scores: list[float], levels: list[str]) -> dict:
     }
 
 
-@app.post("/analyzeRisk")
-async def analyze_risk(
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
+@app.post("/analyzeRisk", status_code=202)
+async def start_analyze_risk(
+    data: RiskRequest,
+    background_tasks: BackgroundTasks,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    """Encola el analisis de riesgo. Devuelve 202 {job_id}; el resultado se
+    consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="suicide", job_type="risk",
+            user_id=x_user_id, dataset_name=data.dataset, params={},
+        )
+    except Exception as e:
+        logger.exception(f"[risk-service] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_risk_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+async def _run_risk_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_analyze_risk(RiskRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[risk-service] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[risk-service] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
+
+
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}
+
+
+async def _compute_analyze_risk(
     data: RiskRequest,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
@@ -81,8 +176,8 @@ async def analyze_risk(
         supabase = get_supabase_client(x_user_token)
         ds_info = get_dataset_info(supabase, data.dataset, x_user_id)
         dataset_id = ds_info["dataset_id"]
-        # Autodetección por tipo guardado en ingesta (services.py:163),
-        # con override manual opcional.
+
+
         tipo = str(ds_info.get("tipo", "dataset")).lower()
         es_chat = (data.fuente or ("chat" if tipo == "chat" else "mensajes")) == "chat"
         collection = (_os.environ.get("CHROMA_CHUNKED_COLLECTION", "chunked_chats")
@@ -106,9 +201,7 @@ async def analyze_risk(
         dim = info["embedding_dim"]
         th = risk_service.get_thresholds()
 
-        # Filtra filas sin embedding válido o de otra dimensión (otro encoder).
-        # Ojo: los embeddings pueden venir como np.ndarray -> no usar 'or' ni
-        # truthiness sobre ellos (ValueError: truth value of an array...).
+
         def _emb_ok(e) -> bool:
             if e is None:
                 return False
@@ -128,7 +221,7 @@ async def analyze_risk(
         scores = await asyncio.to_thread(risk_service.score_vectors, X)
         levels = [risk_service.score_to_level(p, th) for p in scores]
 
-        # Por clase (modo mensajes) o evolución por fecha (modo chat, sin 'clase')
+
         by_clase: dict = {}
         evolucion: list[dict] = []
         if not es_chat:
@@ -148,13 +241,13 @@ async def analyze_risk(
                     agg[lv] += 1
             evolucion = [{"mes": m, **v} for m, v in sorted(por_mes.items())]
 
-        # Ranking para evidencia (alto/potencial primero, luego score)
+
         order = sorted(range(len(valid_idx)),
                        key=lambda j: (levels[j] in ("alto", "potencial"), scores[j]),
                        reverse=True)
         top_k = max(1, min(data.top_k or TOP_K_DEFAULT, TOP_K_MAX))
         top_items: list[dict] = []
-        verify_candidates: list[int] = []  # posiciones dentro de order
+        verify_candidates: list[int] = []
         for rank, j in enumerate(order[:top_k]):
             i = valid_idx[j]
             texto = (docs[i] if i < len(docs) else "")[:2000]
@@ -193,7 +286,7 @@ async def analyze_risk(
                     and len(verify_candidates) < VERIFY_CAP):
                 verify_candidates.append(rank)
 
-        # Opción B solo para alto+EN (cascada)
+
         verified = 0
         if verify_candidates:
             b_scores = await asyncio.to_thread(
@@ -203,7 +296,7 @@ async def analyze_risk(
             for r, bs in zip(verify_candidates, b_scores):
                 if bs is not None:
                     top_items[r]["score_b"] = round(float(bs), 4)
-                    # Nivel final: el mayor de ambos
+
                     la = top_items[r]["nivel"]
                     lb = risk_service.score_to_level(float(bs), th)
                     rank_lv = {n: k for k, n in enumerate(risk_service.NIVELES)}
@@ -226,16 +319,14 @@ async def analyze_risk(
         try:
             save_suicide_results(supabase, x_user_id, dataset_id, payload)
         except Exception as e:
-            print(f"[risk-service] warn save: {e}", flush=True)
+            logger.warning(f"[risk-service] warn save: {e}")
 
         return {"dataset_id": dataset_id, **payload}
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[risk-service] error: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[risk-service] fallo en POST /analyzeRisk | method=POST user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 
 @app.post("/getResults")
@@ -253,4 +344,5 @@ async def get_results(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[risk-service] fallo en POST /getResults | method=POST user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")

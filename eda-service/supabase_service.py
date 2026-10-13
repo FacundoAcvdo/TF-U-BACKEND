@@ -35,11 +35,11 @@ def save_eda_results(supabase, user_id: str, dataset_id: str, corpus_stats: dict
         "sentence_freq": sentence_freq,
         "distribution": distribution,
     }
-    # upsert por (dataset_id, user_id) - requiere UNIQUE constraint
+
     try:
         supabase.table("eda_results").upsert(payload, on_conflict="dataset_id,user_id").execute()
     except Exception:
-        # fallback si el driver no soporta on_conflict: delete + insert
+
         try:
             supabase.table("eda_results").delete().eq("dataset_id", dataset_id).eq("user_id", user_id).execute()
         except Exception:

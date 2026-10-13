@@ -7,6 +7,10 @@ None y el servicio sigue funcionando solo con la opción A.
 from __future__ import annotations
 
 import os
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("risk-service")
+
 
 VERIFY_MODEL_ID = os.environ.get(
     "VERIFY_MODEL_ID",
@@ -16,8 +20,7 @@ VERIFY_MODEL_ID = os.environ.get(
 _pipe = None
 _load_error: str | None = None
 
-# Heurística ES mínima (evita dependencia langdetect para el MVP):
-# si el texto tiene marcadores ES claros, se considera no-EN y se salta B.
+
 _ES_MARKERS = (
     "á", "é", "í", "ó", "ú", "ñ", "¿", "¡",
     " que ", " los ", " las ", " una ", " para ", " porque ",
@@ -50,9 +53,9 @@ def _get_pipe():
             max_length=512,
         )
         return _pipe
-    except Exception as e:  # sin internet / sin torch -> degradado a solo-A
+    except Exception as e:
         _load_error = str(e)
-        print(f"[risk-service] verificación B no disponible: {e}", flush=True)
+        logger.warning(f"[risk-service] verificación B no disponible: {e}")
         return None
 
 
@@ -75,10 +78,10 @@ def verify(texts: list[str], batch_size: int = 32) -> list[float | None]:
                     best = max(best, s)
                 elif "non" in lab or "not" in lab or lab in ("label_0", "0"):
                     best = max(best, 1.0 - s)
-                else:  # etiqueta desconocida: usa score crudo
+                else:
                     best = max(best, s)
             out.append(best)
         return out
     except Exception as e:
-        print(f"[risk-service] fallo verificación B: {e}", flush=True)
+        logger.exception(f"[risk-service] fallo verificación B: {e}")
         return [None] * len(texts)

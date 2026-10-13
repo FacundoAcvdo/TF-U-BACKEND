@@ -19,8 +19,8 @@ def _normalizar_fechas_a_iso(
     Lanza ValueError si algún valor no vacío es inválido (fail-fast,
     igual que el parseo por fila anterior).
     """
-    # dayfirst según formato: DMY (o sin formato) -> True; MDY/YMD -> False.
-    # Para YMD con '/', pandas ya interpreta año primero; dayfirst no afecta.
+
+
     dayfirst = formato_fecha in (None, "DMY")
 
     original = serie.astype(object)
@@ -135,16 +135,14 @@ class DataFrameParser(
             if column not in columnas_mapeadas
         ]
 
-        # Fechas normalizadas una sola vez por columna (vectorizado),
-        # no una conversión por fila.
+
         fechas_iso: list[str | None] | None = None
         if columna_fecha:
             fechas_iso = _normalizar_fechas_a_iso(
                 df[columna_fecha], formato_fecha
             )
 
-        # Registros como dicts (sin el overhead de Series por fila
-        # que impone df.iterrows()).
+
         registros = df.to_dict(orient="records")
 
         documents: list[Document] = []
@@ -289,14 +287,14 @@ class CSVParser(
         try:
             df_pl = pl.read_csv(
                 io.BytesIO(content),
-                encoding="utf8-lossy", 
+                encoding="utf8-lossy",
                 separator=sep,
                 infer_schema_length=0,
                 ignore_errors=True,
                 truncate_ragged_lines=True,
                 null_values=["", "NULL", "#¿NOMBRE?"],
             )
-            if len(df_pl.columns) > 1:  # válido
+            if len(df_pl.columns) > 1:
                 return df_pl.to_pandas()
         except Exception:
             pass

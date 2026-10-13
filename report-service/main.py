@@ -1,11 +1,20 @@
+import time
+import uuid
 import os
 import tempfile
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+import logging
+from logging_utils import setup_service_logger
+import jobs
+
+logger = setup_service_logger("report-service")
 
 from informe import (
     componer_pdf,
@@ -186,27 +195,58 @@ class DatosGraficosRequest(BaseModel):
     secciones: list[str]
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
 @app.post("/datos-graficos")
 async def datos_graficos(
     data: DatosGraficosRequest,
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
 ):
-    supabase = get_supabase_client(x_user_token)
-    ds = resolver_dataset(supabase, data.dataset, x_user_id)
-    dataset_id = ds.get("dataset_id")
-    validos = set(FUENTE_POR_SECCION.keys())
-    salida: dict[str, list[dict]] = {}
-    for sid in (data.secciones or []):
-        if sid not in validos:
-            continue
-        fuente = leer_fuente(supabase, FUENTE_POR_SECCION[sid], data.dataset, x_user_id, dataset_id)
-        if fuente is None:
-            continue
-        specs = specs_para_fuente(sid, fuente)
-        if specs:
-            salida[sid] = specs
-    return {"dataset": data.dataset, "graficos": salida}
+    try:
+        supabase = get_supabase_client(x_user_token)
+        ds = resolver_dataset(supabase, data.dataset, x_user_id)
+        dataset_id = ds.get("dataset_id")
+        validos = set(FUENTE_POR_SECCION.keys())
+        salida: dict[str, list[dict]] = {}
+        for sid in (data.secciones or []):
+            if sid not in validos:
+                continue
+            fuente = leer_fuente(supabase, FUENTE_POR_SECCION[sid], data.dataset, x_user_id, dataset_id)
+            if fuente is None:
+                continue
+            specs = specs_para_fuente(sid, fuente)
+            if specs:
+                salida[sid] = specs
+        return {"dataset": data.dataset, "graficos": salida}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[report-service] fallo en POST /datos-graficos | method=POST user_id={x_user_id} dataset={data.dataset} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
 
 
 def _pares(lista, nombres=("nombre", "clase", "label", "text", "texto", "palabra", "emocion", "categoria"),
@@ -615,67 +655,151 @@ async def disponibles(
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
 ):
-    supabase = get_supabase_client(x_user_token)
-    return inventario(supabase, dataset, x_user_id)
+    try:
+        supabase = get_supabase_client(x_user_token)
+        return inventario(supabase, dataset, x_user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[report-service] fallo en GET /disponibles | method=GET user_id={x_user_id} dataset={dataset} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
 
 
-@app.post("/generar")
-async def generar(
+@app.post("/generar", status_code=202)
+async def start_generar(
     data: GenerarRequest,
+    background_tasks: BackgroundTasks,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Encola la generacion del informe. Devuelve 202 {job_id};
+    el PDF se descarga con GET /descargar/{job_id} cuando termina."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="report", job_type="report",
+            user_id=x_user_id, dataset_name=data.dataset,
+            params=data.model_dump(mode="json"),
+        )
+    except Exception as e:
+        logger.exception(f"[report-service] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_report_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+async def _run_report_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        data = GenerarRequest(**payload)
+        x_user_id, x_user_token = user_id, user_token
+        supabase = get_supabase_client(x_user_token)
+        ds = resolver_dataset(supabase, data.dataset, x_user_id)
+        dataset_id = ds.get("dataset_id")
+
+        validos = set(SECCIONES)
+        pedidos = [s for s in (data.secciones or []) if s in validos]
+        if not pedidos:
+            raise HTTPException(status_code=422, detail="No se pidieron secciones válidas.")
+
+        partes: list[dict] = []
+        omitidas: list[str] = []
+        fuentes: dict[str, object] = {}
+        svgs_pedidos: dict[str, list[str]] = data.graficos if isinstance(data.graficos, dict) else {}
+        pngs_pedidos: dict[str, list[str]] = data.pngs if isinstance(data.pngs, dict) else {}
+        for sid in pedidos:
+            fuente_id = FUENTE_POR_SECCION.get(sid)
+            if fuente_id is None:
+                omitidas.append(TITULOS.get(sid, sid))
+                continue
+            fuente = leer_fuente(supabase, fuente_id, data.dataset, x_user_id, dataset_id)
+            if fuente is None:
+                omitidas.append(TITULOS.get(sid, sid))
+                continue
+            fuentes[sid] = fuente
+            try:
+                sec = CONSTRUCTORES[fuente_id](fuente)
+            except Exception as e:
+                logger.warning(f"[report-service] seccion omitida | seccion={sid} causa={type(e).__name__}: {e}")
+                omitidas.append(TITULOS.get(sid, sid))
+                continue
+            crudos = svgs_pedidos.get(sid) or []
+            sec["svgs"] = [s for s in crudos if isinstance(s, str)][:8] if sid != "evolucion" else []
+            crudos_png = pngs_pedidos.get(sid) or []
+            sec["pngs_bytes"] = []
+            for raw in crudos_png[:4]:
+                dec = decodificar_png(raw)
+                if dec is not None:
+                    sec["pngs_bytes"].append(dec)
+            partes.append(sec)
+
+        if not partes:
+            raise HTTPException(
+                status_code=422,
+                detail="Este dataset no tiene análisis realizados para las secciones pedidas.",
+            )
+
+        partes.insert(0, construir_resumen(data.dataset, fuentes))
+        try:
+            pdf = componer_pdf(data.dataset, partes, omitidas)
+        except Exception as e:
+            logger.exception(f"[report-service] fallo componiendo PDF | user_id={x_user_id} dataset={data.dataset} causa={type(e).__name__}: {e}")
+            raise HTTPException(status_code=500, detail="Error interno generando el informe.") from e
+
+        fecha = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+        nombre = f"informe_{data.dataset}_{fecha}.pdf".replace(" ", "_")
+        ruta = os.path.join(tempfile.gettempdir(), f"informe_job_{job_id}.pdf")
+        with open(ruta, "wb") as f:
+            f.write(pdf)
+        jobs.mark_succeeded(supabase, job_id, {"filename": nombre, "omitidas": omitidas})
+    except HTTPException as e:
+        logger.warning(f"[report-service] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[report-service] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno generando el informe.")
+        return
+
+
+@app.get("/descargar/{job_id}")
+async def descargar_informe(
+    job_id: str,
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
 ):
     supabase = get_supabase_client(x_user_token)
-    ds = resolver_dataset(supabase, data.dataset, x_user_id)
-    dataset_id = ds.get("dataset_id")
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None or row.get("status") != "succeeded":
+        raise HTTPException(status_code=404, detail="Informe no disponible.")
+    ruta = os.path.join(tempfile.gettempdir(), f"informe_job_{job_id}.pdf")
+    if not os.path.isfile(ruta):
+        raise HTTPException(status_code=404, detail="El archivo ya no esta disponible.")
+    filename = (row.get("result") or {}).get("filename", f"informe_{job_id}.pdf")
+    return FileResponse(path=ruta, media_type="application/pdf", filename=filename)
 
-    validos = set(SECCIONES)
-    pedidos = [s for s in (data.secciones or []) if s in validos]
-    if not pedidos:
-        raise HTTPException(status_code=422, detail="No se pidieron secciones válidas.")
 
-    partes: list[dict] = []
-    omitidas: list[str] = []
-    fuentes: dict[str, object] = {}
-    svgs_pedidos: dict[str, list[str]] = data.graficos if isinstance(data.graficos, dict) else {}
-    pngs_pedidos: dict[str, list[str]] = data.pngs if isinstance(data.pngs, dict) else {}
-    for sid in pedidos:
-        fuente_id = FUENTE_POR_SECCION.get(sid)
-        if fuente_id is None:
-            omitidas.append(TITULOS.get(sid, sid))
-            continue
-        fuente = leer_fuente(supabase, fuente_id, data.dataset, x_user_id, dataset_id)
-        if fuente is None:
-            omitidas.append(TITULOS.get(sid, sid))
-            continue
-        fuentes[sid] = fuente
-        try:
-            sec = CONSTRUCTORES[fuente_id](fuente)
-        except Exception:
-            omitidas.append(TITULOS.get(sid, sid))
-            continue
-        crudos = svgs_pedidos.get(sid) or []
-        sec["svgs"] = [s for s in crudos if isinstance(s, str)][:8] if sid != "evolucion" else []
-        crudos_png = pngs_pedidos.get(sid) or []
-        sec["pngs_bytes"] = []
-        for raw in crudos_png[:4]:
-            dec = decodificar_png(raw)
-            if dec is not None:
-                sec["pngs_bytes"].append(dec)
-        partes.append(sec)
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
 
-    if not partes:
-        raise HTTPException(
-            status_code=422,
-            detail="Este dataset no tiene análisis realizados para las secciones pedidas.",
-        )
 
-    partes.insert(0, construir_resumen(data.dataset, fuentes))
-    pdf = componer_pdf(data.dataset, partes, omitidas)
-
-    fecha = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    nombre = f"informe_{data.dataset}_{fecha}.pdf".replace(" ", "_")
-    ruta = os.path.join(tempfile.gettempdir(), nombre)
-    with open(ruta, "wb") as f:
-        f.write(pdf)
-    return FileResponse(path=ruta, media_type="application/pdf", filename=nombre)
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}

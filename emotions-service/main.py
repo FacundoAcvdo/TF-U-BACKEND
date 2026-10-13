@@ -1,6 +1,9 @@
+import time
+import uuid
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 import asyncio
 import os
@@ -14,22 +17,25 @@ from chroma_reader import fetch_paginated
 from emotion_service import EMOTIONS, enrich_dataframe_with_emotions, get_emotion_pipeline
 from stats_service import get_corpus_emotion_stats, get_class_emotion_stats
 from supabase_service import (
+
     get_supabase_client,
     get_dataset_info,
     save_emotions_results,
     get_emotions_results,
 )
+import logging
+from logging_utils import setup_service_logger
+import jobs
+logger = setup_service_logger("emotions-service")
 
-# stopwords igual que wordcloud para top palabras — con fallback robusto
-# Si NLTK corpora no está descargado (Docker sin nltk.download), antes quedaba STOPWORDS vacío
-# y por eso top3 mostraba "that, and, the, que, para, por". Ahora fallback hardcodeado + download.
+
 _FALLBACK_EN = {
     "a","about","above","after","again","against","ain","all","am","an","and","any","are","aren","aren't","as","at","be","because","been","before","being","below","between","both","but","by","can","couldn","couldn't","d","did","didn","didn't","do","does","doesn","doesn't","doing","don","don't","down","during","each","few","for","from","further","had","hadn","hadn't","has","hasn","hasn't","have","haven","haven't","having","he","he'd","he'll","he's","her","here","hers","herself","him","himself","his","how","i","i'd","i'll","i'm","i've","if","in","into","is","isn","isn't","it","it'd","it'll","it's","its","itself","just","ll","m","ma","me","mightn","mightn't","more","most","mustn","mustn't","my","myself","needn","needn't","no","nor","not","now","o","of","off","on","once","only","or","other","our","ours","ourselves","out","over","own","re","s","same","shan","shan't","she","she'd","she'll","she's","should","should've","shouldn","shouldn't","so","some","such","t","than","that","that'll","the","their","theirs","them","themselves","then","there","these","they","they'd","they'll","they're","they've","this","those","through","to","too","under","until","up","ve","very","was","wasn","wasn't","we","we'd","we'll","we're","we've","were","weren","weren't","what","when","where","which","while","who","whom","why","will","with","won","won't","wouldn","wouldn't","y","you","you'd","you'll","you're","you've","your","yours","yourself","yourselves"
 }
 _FALLBACK_ES = {
     "de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","no","una","su","al","lo","como","más","pero","sus","le","ya","o","este","sí","porque","esta","entre","cuando","muy","sin","sobre","también","me","hasta","hay","donde","quien","desde","todo","nos","durante","todos","uno","les","ni","contra","otros","ese","eso","ante","ellos","e","esto","mí","antes","algunos","qué","unos","yo","otro","otras","otra","él","tanto","esa","estos","mucho","quienes","nada","muchos","cual","poco","ella","estar","estas","algunas","algo","nosotros","mi","mis","tú","te","ti","tu","tus","ellas","nosotras","vosotros","vosotras","os","mío","mía","míos","mías","tuyo","tuya","tuyos","tuyas","suyo","suya","suyos","suyas","nuestro","nuestra","nuestros","nuestras","vuestro","vuestra","vuestros","vuestras","esos","esas","estoy","estás","está","estamos","estáis","están","esté","estés","estemos","estéis","estén","estaré","estarás","estará","estaremos","estaréis","estarán","estaría","estarías","estaríamos","estaríais","estarían","estaba","estabas","estábamos","estabais","estaban","estuve","estuviste","estuvo","estuvimos","estuvisteis","estuvieron","estuviera","estuvieras","estuviéramos","estuvierais","estuvieran","estuviese","estuvieses","estuviésemos","estuvieseis","estuviesen","estando","estado","estada","estados","estadas","estad","he","has","ha","hemos","habéis","han","haya","hayas","hayamos","hayáis","hayan","habré","habrás","habrá","habremos","habréis","habrán","habría","habrías","habríamos","habríais","habrían","había","habías","habíamos","habíais","habían","hube","hubiste","hubo","hubimos","hubisteis","hubieron","hubiera","hubieras","hubiéramos","hubierais","hubieran","hubiese","hubieses","hubiésemos","hubieseis","hubiesen","habiendo","habido","habida","habidos","habidas","soy","eres","es","somos","sois","son","sea","seas","seamos","seáis","sean","seré","serás","será","seremos","seréis","serán","sería","serías","seríamos","seríais","serían","era","eras","éramos","erais","eran","fui","fuiste","fue","fuimos","fuisteis","fueron","fuera","fueras","fuéramos","fuerais","fueran","fuese","fueses","fuésemos","fueseis","fuesen","sintiendo","sentido","sentida","sentidos","sentidas","siente","sentid","tengo","tienes","tiene","tenemos","tenéis","tienen","tenga","tengas","tengamos","tengáis","tengan","tendré","tendrás","tendrá","tendremos","tendréis","tendrán","tendría","tendrías","tendríamos","tendríais","tendrían","tenía","tenías","teníamos","teníais","tenían","tuve","tuviste","tuvo","tuvimos","tuvisteis","tuvieron","tuviera","tuvieras","tuviéramos","tuvierais","tuvieran","tuviese","tuvieses","tuviésemos","tuvieseis","tuviesen","teniendo","tenido","tenida","tenidos","tenidas","tened"
 }
-# variantes sin tilde por si el texto viene sin acentos (muy común)
+
 _FALLBACK_ES_NORM = {w for w in _FALLBACK_ES}
 for _w in list(_FALLBACK_ES):
     _norm = _w.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ü","u")
@@ -46,27 +52,27 @@ try:
             nltk.download("stopwords", quiet=True)
             STOPWORDS = set(stopwords.words("spanish")) | set(stopwords.words("english"))
         except Exception as e2:
-            print(f"[emotions-service] nltk download fallo ({e2}) -> fallback hardcodeado", flush=True)
+            logger.warning(f"[emotions-service] nltk download fallo ({e2}) -> fallback hardcodeado")
             STOPWORDS = _FALLBACK_ES | _FALLBACK_EN
-    # asegurar palabras reportadas y extras aunque NLTK cargue (cubre variantes sin tilde / mayúsculas)
+
     STOPWORDS |= _FALLBACK_ES | _FALLBACK_EN
-    # normaliza a lowercase por seguridad
+
     STOPWORDS = {w.lower() for w in STOPWORDS}
-    print(f"[emotions-service] STOPWORDS cargadas: {len(STOPWORDS)} (NLTK)", flush=True)
+    pass
 except Exception as e:
-    print(f"[emotions-service] NLTK stopwords no disponible ({e}) -> fallback hardcodeado {len(_FALLBACK_ES|_FALLBACK_EN)}", flush=True)
+    logger.warning(f"[emotions-service] NLTK stopwords no disponible ({e}) -> fallback hardcodeado {len(_FALLBACK_ES|_FALLBACK_EN)}")
     STOPWORDS = _FALLBACK_ES | _FALLBACK_EN
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warmup eager: carga modelo en startup para no penalizar la primera petición (antes 8-13s lazy)
-    print("[emotions-service] warmup start - precargando pipeline", flush=True)
+
+    pass
     try:
-        # to_thread para no bloquear event loop durante descarga/carga de pesos
+
         await asyncio.to_thread(get_emotion_pipeline)
-        print("[emotions-service] warmup done - pipeline listo en startup", flush=True)
+        pass
     except Exception as e:
-        print(f"[emotions-service] warmup fallo (seguirá lazy en primera request): {e}", flush=True)
+        logger.exception(f"[emotions-service] warmup fallo (seguirá lazy en primera request): {e}")
     yield
 
 app = FastAPI(title="Emotions Service", lifespan=lifespan)
@@ -81,7 +87,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-##############
 
 class EmotionsRequest(BaseModel):
     dataset: str
@@ -160,9 +165,9 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
         return top_words
 
     n = len(df_subset)
-    # índice invertido: palabra -> lista de índices de docs donde aparece (presencia, no tf)
+
     inverted: dict[str, list[int]] = defaultdict(list)
-    # también guardamos tokens por doc para fallback frecuencia
+
     for idx, txt in enumerate(df_subset[text_column].astype(str)):
         tokens = _clean_tokens(txt)
         if not tokens:
@@ -174,7 +179,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
     if not inverted:
         return top_words
 
-    # scores por emoción
+
     emo_scores: dict[str, np.ndarray] = {}
     for emo in emotions:
         if emo in df_subset.columns:
@@ -182,8 +187,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
         else:
             emo_scores[emo] = np.zeros(n, dtype=float)
 
-    # si todas las scores son casi constantes (dummy sin modelo, std ~0), no hay señal emocional:
-    # fallback a frecuencia pura para no dar resultados espurios
+
     global_std = max(float(np.std(v)) for v in emo_scores.values()) if emo_scores else 0.0
     use_freq_fallback = global_std < 1e-6
 
@@ -191,7 +195,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
         scores = emo_scores[emo]
 
         if use_freq_fallback:
-            # sin señal del modelo -> palabras más frecuentes del subset
+
             all_tokens = []
             for txt in df_subset[text_column].astype(str):
                 all_tokens.extend(_clean_tokens(txt))
@@ -199,7 +203,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
             top_words[emo] = [w for w, _ in cnt.most_common(top_n)]
             continue
 
-        # candidatos con soporte mínimo
+
         candidates: list[tuple[str, float, int]] = []
         for w, idxs in inverted.items():
             df_w = len(idxs)
@@ -208,7 +212,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
             mean_score = float(scores[idxs].mean()) if idxs else 0.0
             candidates.append((w, mean_score, df_w))
 
-        # si no hay suficientes candidatos por min_df alto, relajar progresivamente a 2 y 1
+
         if len(candidates) < top_n:
             for fallback_min in (2, 1):
                 if fallback_min >= min_df:
@@ -217,7 +221,7 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
                     df_w = len(idxs)
                     if df_w < fallback_min or df_w >= min_df:
                         continue
-                    # evita duplicados
+
                     if any(c[0] == w for c in candidates):
                         continue
                     mean_score = float(scores[idxs].mean()) if idxs else 0.0
@@ -225,22 +229,21 @@ def _top_words_weighted(df_subset: "pd.DataFrame", emotions: list[str], text_col
                 if len(candidates) >= top_n:
                     break
 
-        # orden: primero por mean_score (relevancia emocional), luego por df (soporte)
+
         candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
-        # opcional: filtrar palabras poco discriminativas si mean_score < corpus mean + epsilon
-        # no filtramos agresivo, solo si queda espacio; mantiene top_n siempre
+
         top_words[emo] = [w for w, _, _ in candidates[:top_n]]
 
         if not top_words[emo]:
-            # último fallback: frecuencia pura en subset
+
             all_tokens = []
             for txt in df_subset[text_column].astype(str):
                 all_tokens.extend(_clean_tokens(txt))
             cnt = Counter(all_tokens)
             top_words[emo] = [w for w, _ in cnt.most_common(top_n)]
 
-        # dedup y asegura no stopwords (ya filtrado en _clean_tokens)
+
         top_words[emo] = top_words[emo][:top_n]
 
     return top_words
@@ -257,7 +260,7 @@ def build_top_words(df, emotions, text_column="texto", top_n=3):
     if df.empty or text_column not in df.columns:
         return {emo: [] for emo in emotions}
     n = len(df)
-    # min_df adaptativo: evita palabras raras con 1-2 apariciones que por azar tienen mean alto
+
     if n < 50:
         min_df = 2
     elif n < 200:
@@ -265,7 +268,7 @@ def build_top_words(df, emotions, text_column="texto", top_n=3):
     elif n < 500:
         min_df = 5
     else:
-        min_df = max(5, n // 100)  # 500 docs -> 5, 2000 docs -> 20
+        min_df = max(5, n // 100)
     return _top_words_weighted(df, emotions, text_column, top_n, min_df)
 
 
@@ -288,8 +291,8 @@ def build_class_top_words(df, emotions, text_column="texto", class_column="clase
         else:
             min_df = max(3, n_sub // 50)
         per_emo = _top_words_weighted(subset, emotions, text_column, top_n, min_df)
-        # fallback si alguna emoción quedó vacía (vocab pequeño): usar global de la clase sin filtrar por emoción
-        # _top_words_weighted ya hace fallback, pero por seguridad:
+
+
         for emo in emotions:
             if not per_emo.get(emo):
                 all_tokens = []
@@ -307,17 +310,104 @@ def enrich_class_stats_with_top_words(class_stats, class_top_words):
             if emo in entry and isinstance(entry[emo], dict):
                 entry[emo]["top_words"] = per_emo.get(emo, [])
 
-@app.post("/analyzeEmotions")
-async def analyze_emotions(
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
+@app.post("/analyzeEmotions", status_code=202)
+async def start_analyze_emotions(
     data: EmotionsRequest,
+    background_tasks: BackgroundTasks,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
+):
+    """Encola el analisis de emociones. Devuelve 202 {job_id}; el resultado
+    se consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="emotions", job_type="emotions",
+            user_id=x_user_id, dataset_name=data.dataset, params={},
+        )
+    except Exception as e:
+        logger.exception(f"[emotions] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_emotions_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+async def _run_emotions_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_analyze_emotions(EmotionsRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[emotions] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[emotions] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
+
+
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}
+
+
+async def _compute_analyze_emotions(
+    data: EmotionsRequest,
+    x_user_id: str,
+    x_user_token: str,
 ):
     try:
         supabase = get_supabase_client(x_user_token)
         dataset_info = get_dataset_info(supabase, data.dataset, x_user_id)
         dataset_id = dataset_info["dataset_id"]
-        # Pide solo documents+metadatas, paginado.
+
         chroma_data = await fetch_paginated(
             {"$and": [{"user_id": x_user_id}, {"dataset_id": dataset_id}]},
             ["documents", "metadatas"],
@@ -344,7 +434,7 @@ async def analyze_emotions(
         try:
             save_emotions_results(supabase, x_user_id, dataset_id, EMOTIONS, corpus_stats, class_stats, correlation, distribution, top_words, class_top_words)
         except Exception as e:
-            print(f"[emotions-service] warn save_emotions_results: {e}")
+            logger.warning(f"[emotions-service] warn save_emotions_results: {e}")
 
         return {
             "dataset_id": dataset_id,
@@ -359,8 +449,8 @@ async def analyze_emotions(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[emotions-service] Error al procesar emociones: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al procesar emociones: {str(e)}")
+        logger.exception(f"[emotions-service] Error al procesar emociones: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar emociones.")
 
 
 @app.post("/getResults")
@@ -378,5 +468,5 @@ async def get_results(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[emotions-service] Error al obtener resultados: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener resultados: {str(e)}")
+        logger.exception(f"[emotions-service] Error al obtener resultados: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al obtener resultados.")

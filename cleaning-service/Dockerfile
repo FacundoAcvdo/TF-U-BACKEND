@@ -30,4 +30,4 @@ RUN python -m spacy download en_core_web_sm \
     && python -m nltk.downloader -d /app/nltk_data punkt punkt_tab \
     && rm -rf /root/.cache/pip
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8089"]
+CMD ["uvicorn", "--no-access-log", "main:app", "--host", "0.0.0.0", "--port", "8089"]

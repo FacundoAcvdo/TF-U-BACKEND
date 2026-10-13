@@ -65,8 +65,7 @@ class ChromaService:
         dataset_id: str,
         user_id: str,
     ):
-        # HttpClient es bloqueante → to_thread.
+
         return await asyncio.to_thread(
             self._fetch_sync, dataset_id=dataset_id, user_id=user_id
         )
-

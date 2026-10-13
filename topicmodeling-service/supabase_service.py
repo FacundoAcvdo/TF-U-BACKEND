@@ -3,12 +3,16 @@ from typing import Any
 from supabase import create_client
 
 from config import get_settings
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("topicmodeling-service")
+
 
 TOPICS_TABLE = "topicmodeling_results"
 
-# Si el payload supera este tamaño se arranca directo en nivel truncado.
+
 TOPICS_SAVE_WARN_BYTES = 500_000
-# Recorte de cada documento representativo en el nivel truncado.
+
 TOPICS_TRUNCATED_CHARS = 500
 
 
@@ -129,11 +133,11 @@ class SupabaseService:
         user_id: str,
         user_token: str,
     ) -> dict[str, Any] | None:
-        print(f"Obteniendo dataset '{dataset_name}' para user_id: {user_id}")
+        pass
         supabase = self.get_supabase_client(
             user_jwt=user_token,
         )
-        print(f"Consultando dataset '{dataset_name}' para user_id: {user_id}")
+        pass
         response = (
             supabase
             .table(self.table)
@@ -219,10 +223,7 @@ class SupabaseService:
 
         start = 0
         if _payload_size_bytes(topics_full) > TOPICS_SAVE_WARN_BYTES:
-            print(
-                "[SupabaseService] Payload de tópicos grande, "
-                "guardando directo en nivel truncado."
-            )
+            pass
             start = 1
 
         base = {
@@ -242,23 +243,18 @@ class SupabaseService:
                     {**base, "topics": topics},
                 )
                 if name != "completo":
-                    print(
-                        "[SupabaseService] Tópicos guardados en "
-                        f"nivel '{name}'."
-                    )
+                    pass
                 return
             except Exception as exc:
-                print(
-                    "[SupabaseService] save_topic_results "
-                    f"nivel '{name}' falló: {exc}"
-                )
+                logger.exception("[SupabaseService] save_topic_results "
+
+                    f"nivel '{name}' falló: {exc}")
                 if not _looks_like_size_error(exc):
                     break
 
-        print(
-            "[SupabaseService] No se pudo guardar el caché de "
-            "tópicos (se devuelve el resultado calculado igual)."
-        )
+        logger.warning("[SupabaseService] No se pudo guardar el caché de "
+
+            "tópicos (se devuelve el resultado calculado igual).")
 
     @staticmethod
     def _upsert_topics(supabase, payload: dict[str, Any]) -> None:

@@ -34,7 +34,7 @@ class Document:
         for key, value in self.metadata.items():
             if value is None:
                 continue
-            
+
             if isinstance(value, float) and math.isnan(value):
                 continue
 

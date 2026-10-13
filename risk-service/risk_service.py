@@ -16,7 +16,7 @@ ARTIFACTS_DIR = BASE_DIR / "model_artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "risk_model.pkl"
 THRESHOLDS_PATH = ARTIFACTS_DIR / "thresholds.json"
 
-# Orden canónico de niveles (para frontend: donut + tabla)
+
 NIVELES = ["nulo", "bajo", "medio", "potencial", "alto"]
 
 _bundle = None
@@ -81,7 +81,7 @@ def score_to_level(p: float, th: dict | None = None) -> str:
 def warmup() -> dict:
     info = get_model_info()
     th = get_thresholds()
-    # Touch del clasificador para fallar rápido si el .pkl está corrupto
+
     dummy = np.zeros((1, info["embedding_dim"]), dtype=np.float32)
     _load_bundle()["clf"].predict_proba(dummy)
     return {**info, "thresholds": th}

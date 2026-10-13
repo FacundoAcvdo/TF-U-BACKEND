@@ -1,4 +1,4 @@
-# Prompts por colección (router PROMPTS al final del archivo)
+
 
 PROMPT_RAG_DOCS = """Eres un asistente técnico para INVESTIGADORES en salud mental (depresión, ansiedad, factores de riesgo y prevención del suicidio).
 
@@ -93,7 +93,7 @@ Pregunta:
 Respuesta:"""
 
 PROMPT_TITLE = """Genera un título corto (máx 6 palabras, sin comillas ni punto final) que resuma esta consulta:\n{question}"""
-# Router por nombre de colección
+
 PROMPTS = {
     "rag_docs": PROMPT_RAG_DOCS,
     "documents": PROMPT_DOCUMENTS,

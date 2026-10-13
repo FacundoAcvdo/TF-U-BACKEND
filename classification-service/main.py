@@ -1,8 +1,11 @@
+import time
+import uuid
 import asyncio
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -17,11 +20,16 @@ from data import (
 )
 from schemas import ResumenMenciones, TrainingRequest, TrainingResponse
 from training import (
+
     entrenar_bert,
     entrenar_sklearn,
     procesar_etiquetas_automatico,
     validar_tamano_muestras,
 )
+import logging
+from logging_utils import setup_service_logger
+import jobs
+logger = setup_service_logger("classification-service")
 
 
 app = FastAPI()
@@ -32,9 +40,9 @@ async def lifespan(app: FastAPI):
     try:
         n = limpiar_modelos_antiguos()
         if n:
-            print(f"[classification] limpieza inicial: {n} modelo(s) de +24h borrados")
+            pass
     except Exception as e:
-        print(f"[classification] limpieza inicial omitida: {e}")
+        logger.warning(f"[classification] limpieza inicial omitida: {e}")
     yield
 
 
@@ -51,8 +59,96 @@ app.add_middleware(
 )
 
 
-@app.post("/detectar_menciones", response_model=TrainingResponse)
-async def detectar_menciones(
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
+@app.post("/detectar_menciones", status_code=202)
+async def start_detectar_menciones(
+    data: TrainingRequest,
+    background_tasks: BackgroundTasks,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Encola el entrenamiento/deteccion. Devuelve 202 {job_id}; el resultado
+    se consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="classification", job_type="classification",
+            user_id=x_user_id, dataset_name=data.dataset,
+            params={"modelo": data.modelo},
+        )
+    except Exception as e:
+        logger.exception(f"[classification] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_classification_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+async def _run_classification_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_detectar_menciones(TrainingRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[classification] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[classification] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result, mode="json"))
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
+
+
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}
+
+
+async def _compute_detectar_menciones(
     data: TrainingRequest,
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
@@ -88,7 +184,7 @@ async def detectar_menciones(
         }
 
         es_bert = data.modelo == "BERT"
-  
+
         clases, documentos, x_vectors = await asyncio.to_thread(
             obtener_datos_dataset,
             collection,
@@ -156,7 +252,8 @@ async def detectar_menciones(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[classification] fallo en detectar_menciones | method=POST causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 
 @app.get("/descargar_modelo")

@@ -1,4 +1,8 @@
 import numpy as np
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("evolution-service")
+
 
 EMOTIONS = ["anger", "disgust", "fear", "joy", "sadness", "surprise"]
 
@@ -18,7 +22,7 @@ def get_emotion_pipeline():
     if _pipeline is not None:
         return _pipeline
     device = _detect_device()
-    print(f"[evolution-service] device={'GPU' if device == 0 else 'CPU'} single-model {MODEL_SINGLE}", flush=True)
+    pass
     try:
         from transformers import pipeline
         import torch
@@ -39,10 +43,10 @@ def get_emotion_pipeline():
             model_kwargs=model_kwargs if model_kwargs else None,
         )
         _pipeline = pipe
-        print(f"[evolution-service] {MODEL_SINGLE} OK", flush=True)
+        pass
         return _pipeline
     except Exception as e:
-        print(f"[evolution-service] fallo carga {MODEL_SINGLE}: {e} -> dummy", flush=True)
+        logger.warning(f"[evolution-service] fallo carga {MODEL_SINGLE}: {e} -> dummy")
         _pipeline = None
         return None
 
@@ -76,7 +80,7 @@ def predecir_emociones_textos(
                         scores[i, cat_index[lab]] = float(item.get("score", 0.0))
             return scores
         except Exception as e:
-            print(f"[evolution-service] batch vectorizado fallo: {e} -> fallback por fila", flush=True)
+            logger.warning(f"[evolution-service] batch vectorizado fallo: {e} -> fallback por fila")
             scores = np.zeros((n, m), dtype=np.float32)
             cat_index = {c: i for i, c in enumerate(categories)}
             for i, t in enumerate(truncados):
@@ -94,7 +98,7 @@ def predecir_emociones_textos(
                     pass
             return scores
 
-    print("[evolution-service] dummy scores (sin modelo)", flush=True)
+    logger.warning("[evolution-service] dummy scores (sin modelo)")
     dummy = np.random.rand(n, m).astype(np.float32)
     row_sums = dummy.sum(axis=1, keepdims=True)
     return dummy / np.where(row_sums == 0, 1, row_sums)

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import time
 import uuid
@@ -16,8 +16,12 @@ from models import (
 )
 from parsers import ParserFactory
 from supabase_repository import (
+
     SupabaseRepository,
 )
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("dataset-service")
 
 
 def _format_chat_line(document: Document) -> str:
@@ -67,7 +71,7 @@ class DatasetService:
             uuid.uuid4()
         )
 
-        # Lookup de nombre en thread: supabase-py es bloqueante.
+
         dataset_name = await asyncio.to_thread(
             self.supabase.get_available_dataset_name,
             user_id=user_id,
@@ -75,7 +79,7 @@ class DatasetService:
             user_token=user_token,
         )
 
-        # Parseo en thread: CPU-bound (pandas/polars).
+
         documents = await asyncio.to_thread(
             self._parse_documents,
             content=content,
@@ -104,8 +108,7 @@ class DatasetService:
             documents=documents,
         )
 
-        # Embed + insert por chunks (streaming): acota RAM y solapa GPU/red.
-        # Sin materializar N vectores antes del primer insert.
+
         chunk_size = get_settings().ingest_chunk_size
         all_embeddings: list[list[float]] = []
 
@@ -153,14 +156,14 @@ class DatasetService:
                 all_embeddings
             )
 
-            # Payload real en Chroma (documentos + metadata), no el archivo crudo.
+
             documents_size_bytes = sum(
                 len(text.encode("utf-8"))
                 + len(json.dumps(meta, ensure_ascii=False).encode("utf-8"))
                 for text, meta in zip(chroma_data.documents, chroma_data.metadatas)
             )
 
-            # Vectores de chunks: misma dimensión que los principales.
+
             dimension = len(all_embeddings[0]) if all_embeddings else 0
             embedding_chunked_size_bytes = chunked_payload_bytes + chunked_count * dimension * 4
 
@@ -169,7 +172,7 @@ class DatasetService:
                 user_id=dataset.user_id,
                 filename=dataset.filename,
                 user_token=user_token,
-                # Documentos + metadata tal como quedan en Chroma.
+
                 dataset_size=documents_size_bytes,
                 embedding_size=embedding_size_bytes,
                 embedding_chunked_size=embedding_chunked_size_bytes,
@@ -227,9 +230,7 @@ class DatasetService:
             if value is not None
         }
 
-        # Chats de WhatsApp: el .txt se convierte a CSV con columnas
-        # fijas fecha,hora,remitente,mensaje, por lo que el autor se infiere
-        # sin pedirlo en el front.
+
         columna_autor_resuelto = columna_autor
         if (
             es_chat
@@ -298,8 +299,8 @@ class DatasetService:
                 "dataset_id": str(dataset_id),
                 "user_id": str(user_id),
                 "source_filename": str(dataset_name or ""),
-                # Versionado: permite detectar vectores de otro modelo
-                # (las dims deben coincidir dentro de la colección).
+
+
                 "embedding_model": str(
                     getattr(
                         self.embedding_provider,
@@ -489,7 +490,7 @@ class DatasetService:
             return datasets
 
         except Exception as e:
-            print(f"Error retrieving datasets for user {user_id}: {e}")
+            logger.exception(f"Error retrieving datasets for user {user_id}: {e}")
             raise
 
     async def delete_dataset(
@@ -515,7 +516,7 @@ class DatasetService:
             )
 
         except Exception as e:
-            print(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
+            logger.exception(f"Error deleting dataset {dataset_id} for user {user_id}: {e}")
             raise
 
     def delete_dataset_vectors(
@@ -538,20 +539,21 @@ class DatasetService:
                 )
 
                 if not self.chroma.has_remaining(where):
-                    print(f"[dataset] Vectores del dataset {dataset_id} eliminados.", flush=True)
+                    pass
                     return
 
-                print(f"[dataset] Aún quedan vectores del dataset "
-                      f"{dataset_id}, reintentando ({attempt}/{attempts})...", flush=True)
+                pass
 
             except Exception as e:
-                print(f"[dataset] Borrado de vectores {dataset_id} "
-                      f"intento {attempt}/{attempts} falló: {e}", flush=True)
+                logger.exception(f"[dataset] Borrado de vectores {dataset_id} "
+
+                      f"intento {attempt}/{attempts} falló: {e}")
 
             time.sleep(5 * attempt)
 
-        print(f"[dataset] WARNING: quedaron vectores huérfanos "
-              f"del dataset {dataset_id}.", flush=True)
+        logger.warning(f"[dataset] WARNING: quedaron vectores huérfanos "
+
+              f"del dataset {dataset_id}.")
 
     async def delete_datasets_by_user(
         self,
@@ -569,7 +571,7 @@ class DatasetService:
             )
 
         except Exception as e:
-            print(f"Error deleting datasets for user {user_id}: {e}")
+            logger.exception(f"Error deleting datasets for user {user_id}: {e}")
             raise
 
     def delete_user_vectors(
@@ -592,17 +594,18 @@ class DatasetService:
                 )
 
                 if not self.chroma.has_remaining(where):
-                    print(f"[dataset] Vectores del usuario {user_id} eliminados.", flush=True)
+                    pass
                     return
 
-                print(f"[dataset] Aún quedan vectores del usuario "
-                      f"{user_id}, reintentando ({attempt}/{attempts})...", flush=True)
+                pass
 
             except Exception as e:
-                print(f"[dataset] Borrado de vectores {user_id} "
-                      f"intento {attempt}/{attempts} falló: {e}", flush=True)
+                logger.exception(f"[dataset] Borrado de vectores {user_id} "
+
+                      f"intento {attempt}/{attempts} falló: {e}")
 
             time.sleep(5 * attempt)
 
-        print(f"[dataset] WARNING: quedaron vectores huérfanos "
-              f"del usuario {user_id}.", flush=True)
+        logger.warning(f"[dataset] WARNING: quedaron vectores huérfanos "
+
+              f"del usuario {user_id}.")
