@@ -22,8 +22,11 @@ logger = setup_service_logger("rag-service")
 
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "google").lower()
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3.6-flash")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "2000"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
@@ -135,6 +138,23 @@ class RAGService:
 
 
     def _init_llm(self):
+        if LLM_PROVIDER == "groq":
+            if not GROQ_API_KEY:
+                logger.warning("[rag_service] LLM_PROVIDER=groq sin GROQ_API_KEY.")
+                self.llm = None
+                return
+            try:
+                from langchain_groq import ChatGroq
+            except Exception as e:
+                logger.error(f"[rag_service] falta paquete langchain-groq: {e}")
+                self.llm = None
+                return
+            self.llm = ChatGroq(
+                model=GROQ_MODEL,
+                api_key=GROQ_API_KEY,
+                temperature=0.2,
+            )
+            return
         if not GOOGLE_API_KEY:
             self.llm = None
             return
