@@ -177,13 +177,13 @@ async def send_message(
     mensajes_previos = get_chat_messages(supabase, chat_id, x_user_id)
     historial_previo = [
         {"autor": m.get("autor"), "mensaje": m.get("mensaje")}
-        for m in mensajes_previos
+        for m in mensajes_previos[-4:]
     ]
 
 
     msg_usuario = create_message(supabase, chat_id, x_user_id, "usuario", pregunta)
 
-    historial_para_rag = historial_previo + [{"autor": "usuario", "mensaje": pregunta}]
+    historial_para_rag = historial_previo
 
 
     if not rag_service.is_store_ready(collection):

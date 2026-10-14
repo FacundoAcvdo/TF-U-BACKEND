@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 
 from utils import build_dataframe_from_chroma
 from chroma_reader import fetch_paginated
-from emotion_service import EMOTIONS, enrich_dataframe_with_emotions, get_emotion_pipeline
+from emotion_service import EMOTIONS, enrich_dataframe_with_emotions, get_emotion_pipeline, quality_summary
 from stats_service import get_corpus_emotion_stats, get_class_emotion_stats
 from supabase_service import (
 
@@ -430,9 +430,10 @@ async def _compute_analyze_emotions(
         top_words = build_top_words(df_enriched, EMOTIONS, text_column="texto", top_n=3)
         class_top_words = build_class_top_words(df_enriched, EMOTIONS, text_column="texto", class_column="clase", top_n=3)
         enrich_class_stats_with_top_words(class_stats, class_top_words)
+        calidad = quality_summary(df_enriched)
 
         try:
-            save_emotions_results(supabase, x_user_id, dataset_id, EMOTIONS, corpus_stats, class_stats, correlation, distribution, top_words, class_top_words)
+            save_emotions_results(supabase, x_user_id, dataset_id, EMOTIONS, corpus_stats, class_stats, correlation, distribution, top_words, class_top_words, calidad)
         except Exception as e:
             logger.warning(f"[emotions-service] warn save_emotions_results: {e}")
 
@@ -445,6 +446,7 @@ async def _compute_analyze_emotions(
             "distribution": distribution,
             "top_words": top_words,
             "class_top_words": class_top_words,
+            "calidad": calidad,
         }
     except HTTPException:
         raise

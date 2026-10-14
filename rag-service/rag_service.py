@@ -10,7 +10,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from chroma_service import get_chroma_client, get_or_create_collection
@@ -28,6 +28,18 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "2000"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
 TOP_K = int(os.environ.get("TOP_K", "4"))
+
+RETRIEVE_K = int(os.environ.get("RETRIEVE_K", "12"))
+RERANK_ENABLED = os.environ.get("RERANK", "true").lower() in ("true", "1", "yes", "on")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANK_MIN_SCORE = float(os.environ.get("RERANK_MIN_SCORE", "-2.0"))
+HISTORY_TAIL = int(os.environ.get("HISTORY_TAIL", "4"))
+HISTORY_MSG_CHARS = int(os.environ.get("HISTORY_MSG_CHARS", "600"))
+HISTORY_MAX_CHARS = int(os.environ.get("HISTORY_MAX_CHARS", "2000"))
+
+NO_EVIDENCE_MSG = (
+    "No tengo información suficiente en los documentos indexados sobre ese punto."
+)
 
 DOCS_PATH = os.environ.get("DOCS_PATH", "/app/data/rag_docs")
 
@@ -53,11 +65,28 @@ def _format_history(chat_history: List[dict]) -> str:
     if not chat_history:
         return "Sin historial previo."
     lines = []
-    for m in chat_history[-6:]:
+    for m in chat_history[-HISTORY_TAIL:]:
         autor = m.get("autor", "usuario")
-        texto = m.get("mensaje", "")
+        texto = str(m.get("mensaje", ""))[:HISTORY_MSG_CHARS]
         lines.append(f"{autor}: {texto}")
-    return "\n".join(lines)
+    texto = "\n".join(lines)
+    if len(texto) > HISTORY_MAX_CHARS:
+        texto = texto[-HISTORY_MAX_CHARS:]
+    return texto
+
+
+_reranker = None
+
+
+def _get_reranker():
+    """Cross-encoder singleton (carga perezosa; None si RERANK=false)."""
+    global _reranker
+    if not RERANK_ENABLED:
+        return None
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        _reranker = CrossEncoder(RERANK_MODEL, max_length=512)
+    return _reranker
 
 
 class E5Embeddings(HuggingFaceEmbeddings):
@@ -243,11 +272,36 @@ class RAGService:
             raise RuntimeError(f"RAG no inicializado para colección '{collection}'")
         store = self.get_store(collection)
         top_k = k or TOP_K
+        retrieve_k = max(RETRIEVE_K, top_k)
 
-        if filter:
-            relevant_docs = store.similarity_search(question, k=top_k, filter=filter)
+        try:
+            candidatos = store.max_marginal_relevance_search(
+                question, k=retrieve_k, filter=filter)
+        except Exception:
+            candidatos = store.similarity_search(question, k=retrieve_k, filter=filter)
+
+        reranker = None
+        if RERANK_ENABLED and len(candidatos) > 1:
+            try:
+                reranker = _get_reranker()
+            except Exception as e:
+                logger.warning(f"[rag_service] reranker no disponible, se usa orden MMR: {e}")
+                reranker = None
+
+        if reranker is not None:
+            pares = [(question, (d.page_content or "")[:2000]) for d in candidatos]
+            puntajes = [float(s) for s in reranker.predict(pares)]
+            ordenados = sorted(zip(candidatos, puntajes),
+                               key=lambda x: x[1], reverse=True)
+            mejor = float(ordenados[0][1]) if ordenados else float("-inf")
+            if mejor < RERANK_MIN_SCORE:
+                logger.warning(
+                    f"[rag_service] sin evidencia (mejor rerank={mejor:.2f} "
+                    f"< {RERANK_MIN_SCORE}): {[round(s, 2) for _, s in ordenados[:4]]}")
+                return NO_EVIDENCE_MSG, []
+            relevant_docs = [d for d, _ in ordenados[:top_k]]
         else:
-            relevant_docs = store.similarity_search(question, k=top_k)
+            relevant_docs = list(candidatos[:top_k])
 
         context = _format_docs(relevant_docs)
         history_str = _format_history(chat_history or [])
