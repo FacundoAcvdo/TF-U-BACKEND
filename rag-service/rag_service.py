@@ -121,20 +121,28 @@ class RAGService:
 
     def _init_embeddings(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.embeddings = E5Embeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={"device": device},
-            encode_kwargs={
-                "normalize_embeddings": True,
-                "batch_size": EMBEDDING_BATCH_SIZE,
-            },
-        )
+        model_kwargs: dict = {"device": device}
         if device == "cuda":
-            try:
-                self.embeddings.client.half()
-            except Exception as e:
-                logger.warning(f"[rag_service] WARNING no se pudo usar fp16: {e}")
-        pass
+            model_kwargs["torch_dtype"] = torch.float16
+        try:
+            self.embeddings = E5Embeddings(
+                model_name=EMBEDDING_MODEL,
+                model_kwargs=model_kwargs,
+                encode_kwargs={
+                    "normalize_embeddings": True,
+                    "batch_size": EMBEDDING_BATCH_SIZE,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[rag_service] no se pudo usar fp16, se usa fp32: {e}")
+            self.embeddings = E5Embeddings(
+                model_name=EMBEDDING_MODEL,
+                model_kwargs={"device": device},
+                encode_kwargs={
+                    "normalize_embeddings": True,
+                    "batch_size": EMBEDDING_BATCH_SIZE,
+                },
+            )
 
 
     def _init_llm(self):
