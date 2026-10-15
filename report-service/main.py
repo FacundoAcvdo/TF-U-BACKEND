@@ -508,7 +508,7 @@ def construir_riesgo(d: dict) -> dict:
     top_items = d.get("top_items", []) or []
     if isinstance(top_items, list) and top_items:
         filas_top = []
-        for it in top_items[:30]:
+        for it in top_items[:3]:
             if not isinstance(it, dict):
                 continue
             texto = str(it.get("texto", ""))
