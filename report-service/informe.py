@@ -139,7 +139,7 @@ def _tabla_metricas(filas: list[tuple[str, str]]):
     datos = [[_celda("Métrica", negrita=True), _celda("Valor", negrita=True)]]
     for k, v in filas:
         datos.append([_celda(k), _celda(v)])
-    tabla = Table(datos, colWidths=[10 * cm, 7 * cm])
+    tabla = Table(datos, colWidths=[10 * cm, 7 * cm], repeatRows=1)
     tabla.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.white),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -175,10 +175,13 @@ def _estilos():
     base = getSampleStyleSheet()
     titulo = ParagraphStyle("Titulo", parent=base["Heading1"], fontSize=24,
                             textColor=colors.HexColor("#111827"), spaceAfter=6,
-                            leading=28)
+                            leading=28, alignment=1)
     subtitulo = ParagraphStyle("Sub", parent=base["Normal"], fontSize=11,
                                textColor=colors.HexColor("#4b5563"), spaceAfter=6,
                                leading=15)
+    ficha = ParagraphStyle("Ficha", parent=base["Normal"], fontName="Helvetica-Bold",
+                           fontSize=11, leading=15, spaceAfter=6,
+                           textColor=colors.HexColor("#111827"))
     h2 = ParagraphStyle("H2", parent=base["Heading2"], fontSize=15,
                         textColor=colors.HexColor("#111827"), spaceBefore=14,
                         spaceAfter=8, keepWithNext=True)
@@ -188,18 +191,21 @@ def _estilos():
     pie = ParagraphStyle("Pie", parent=base["Normal"], fontSize=8,
                          textColor=colors.HexColor("#9aa0b4"), alignment=2)
     aviso = ParagraphStyle("Aviso", parent=base["Normal"], fontName="Helvetica-Bold",
-                           fontSize=8, textColor=colors.HexColor("#111827"),
-                           spaceBefore=8, spaceAfter=8, leading=11)
-    return titulo, subtitulo, h2, cuerpo, pie, aviso
+                           fontSize=9, leading=13,
+                           textColor=colors.HexColor("#1e3a8a"),
+                           borderPadding=(8, 8, 8),
+                           backColor=colors.HexColor("#eef2ff"),
+                           spaceBefore=6, spaceAfter=6)
+    return titulo, subtitulo, h2, cuerpo, pie, aviso, ficha
 
 
 AVISO_LEGAL = (
-    "<b>AVISO IMPORTANTE:</b> el presente documento es un reporte técnico generado "
-    "automáticamente a partir de las actividades y análisis realizados por el usuario "
-    "en la plataforma de análisis de datos, con fines exclusivamente descriptivos y "
-    "académicos. No constituye diagnóstico, evaluación clínica, concepto profesional "
-    "ni recomendación de intervención. Los resultados provienen de modelos automáticos "
-    "que pueden contener errores y deben ser interpretados por personal calificado."
+    "<b>NOTA METODOLÓGICA:</b> el presente documento constituye un reporte técnico "
+    "de las actividades de análisis ejecutadas por el usuario en la plataforma, con "
+    "finalidad exclusivamente descriptiva y académica. Sus resultados derivan de "
+    "modelos estadísticos y de aprendizaje automático, por lo que pueden contener "
+    "errores. No constituye diagnóstico, evaluación clínica ni recomendación "
+    "profesional, y su interpretación corresponde a personal calificado."
 )
 
 
@@ -264,15 +270,16 @@ def incrustar_svg(svg: str, ancho=15 * cm):
 
 
 def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None = None) -> bytes:
-    titulo, subtitulo, h2, cuerpo, _pie, aviso = _estilos()
+    titulo, subtitulo, h2, cuerpo, _pie, aviso, ficha = _estilos()
     fecha = _ahora_argentina().strftime("%d/%m/%Y %H:%M ART")
     nombre_ds = _xml(dataset)
     historia = [
-        Spacer(1, 1 * cm),
+        Spacer(1, 0.4 * cm),
         Paragraph("Informe de análisis de datos", titulo),
-        Spacer(1, 0.3 * cm),
-        Paragraph(f"Dataset: <b>{nombre_ds}</b>", subtitulo),
-        Paragraph(f"Generado: {fecha} &nbsp;·&nbsp; Secciones: {len(secciones)}", subtitulo),
+        Spacer(1, 0.2 * cm),
+        Paragraph(f"Dataset: <b>{nombre_ds}</b>", ficha),
+        Paragraph(f"Generado: {fecha} &nbsp;·&nbsp; Secciones: {len(secciones)}", ficha),
+        Spacer(1, 0.5 * cm),
     ]
     historia.append(Paragraph(AVISO_LEGAL, aviso))
     if omitidas:
@@ -284,10 +291,10 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
         cabeza = [Paragraph(f"{n}. {sec['titulo']}", h2)]
         if sec.get("descripcion"):
             cabeza.append(Paragraph(sec["descripcion"], cuerpo))
-        if sec.get("metricas"):
-            cabeza.append(_tabla_metricas(sec["metricas"]))
-            cabeza.append(Spacer(1, 0.25 * cm))
         historia.append(KeepTogether(cabeza))
+        if sec.get("metricas"):
+            historia.append(_tabla_metricas(sec["metricas"]))
+            historia.append(Spacer(1, 0.25 * cm))
         png_ok = False
         for png in sec.get("pngs_bytes", []):
             img = _imagen_bytes(png)
@@ -310,7 +317,7 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
                     historia.append(img)
                     historia.append(Spacer(1, 0.25 * cm))
         for titulo_tabla, encabezados, filas in sec.get("tablas_datos", []):
-            partes = [filas[i:i + 25] for i in range(0, max(1, len(filas)), 25)] or [[]]
+            partes = [filas[i:i + 12] for i in range(0, max(1, len(filas)), 12)] or [[]]
             for j, parte in enumerate(partes):
                 nombre = str(titulo_tabla) if j == 0 else f"{titulo_tabla} (cont.)"
                 historia.append(KeepTogether([
@@ -323,7 +330,7 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm,
-                            rightMargin=2 * cm, topMargin=2 * cm,
+                            rightMargin=2 * cm, topMargin=1.2 * cm,
                             bottomMargin=2 * cm, title=f"Informe - {dataset}")
     doc.build(historia, onFirstPage=_pie_pagina, onLaterPages=_pie_pagina)
     buf.seek(0)
