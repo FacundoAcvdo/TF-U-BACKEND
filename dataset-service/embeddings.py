@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import os
+import threading
 
 import numpy as np
 import torch
@@ -90,34 +91,40 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
         self.batch_size = batch_size
         self._fp16 = fp16
         self._slot = None
+        self._slot_lock = threading.Lock()
 
     def _get_slot(self):
-        if self._slot is None:
-            provider = self
+        slot = self._slot
+        if slot is None:
+            with self._slot_lock:
+                slot = self._slot
+                if slot is None:
+                    provider = self
 
-            def _load():
-                model_kwargs: dict = {}
-                if provider._fp16 and provider.device == "cuda":
-                    model_kwargs["torch_dtype"] = torch.float16
-                return SentenceTransformer(
-                    provider.model_name,
-                    device=provider.device,
-                    model_kwargs=model_kwargs or None,
-                )
+                    def _load():
+                        model_kwargs: dict = {}
+                        if provider._fp16 and provider.device == "cuda":
+                            model_kwargs["torch_dtype"] = torch.float16
+                        return SentenceTransformer(
+                            provider.model_name,
+                            device=provider.device,
+                            model_kwargs=model_kwargs or None,
+                        )
 
-            def _drop(model):
-                try:
-                    del model
-                except Exception:
-                    pass
+                    def _drop(model):
+                        try:
+                            del model
+                        except Exception:
+                            pass
 
-            self._slot = ModelSlot(
-                name=f"embeddings-{model_name}",
-                vram_mb=EMBEDDING_VRAM_MB,
-                load_fn=_load,
-                unload_fn=_drop,
-            )
-        return self._slot
+                    slot = ModelSlot(
+                        name=f"embeddings-{self.model_name}",
+                        vram_mb=EMBEDDING_VRAM_MB,
+                        load_fn=_load,
+                        unload_fn=_drop,
+                    )
+                    self._slot = slot
+        return slot
 
     def _with_prefix(self, texts: list[str], prefix: str) -> list[str]:
         return [

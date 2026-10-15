@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import threading
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
@@ -142,26 +143,32 @@ class RAGService:
         self.prompts: Dict[str, ChatPromptTemplate] = {}
         self._initialized = False
         self._emb_slot = None
+        self._emb_slot_lock = threading.Lock()
         self._lazy_e5 = _LazyE5Embeddings(self)
 
 
     def _get_emb_slot(self):
-        if self._emb_slot is None:
-            service = self
+        slot = self._emb_slot
+        if slot is None:
+            with self._emb_slot_lock:
+                slot = self._emb_slot
+                if slot is None:
+                    service = self
 
-            def _load():
-                return service._build_embeddings()
+                    def _load():
+                        return service._build_embeddings()
 
-            def _drop(emb):
-                try:
-                    del emb
-                except Exception:
-                    pass
+                    def _drop(emb):
+                        try:
+                            del emb
+                        except Exception:
+                            pass
 
-            self._emb_slot = ModelSlot(
-                name="rag-e5", vram_mb=RAG_EMB_VRAM_MB,
-                load_fn=_load, unload_fn=_drop)
-        return self._emb_slot
+                    slot = ModelSlot(
+                        name="rag-e5", vram_mb=RAG_EMB_VRAM_MB,
+                        load_fn=_load, unload_fn=_drop)
+                    self._emb_slot = slot
+        return slot
 
 
     def _build_embeddings(self):

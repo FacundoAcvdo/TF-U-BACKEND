@@ -16,6 +16,7 @@ Diseno:
 """
 import logging
 import re
+import threading
 
 import numpy as np
 
@@ -46,6 +47,7 @@ _HASHTAG_RE = re.compile(r"#(\w+)")
 _REPEAT_RE = re.compile(r"(.)\1{2,}")
 
 _slots = {}
+_slots_lock = threading.Lock()
 _SLOT_VRAM_MB = {"es": 1200, "en": 800}
 
 
@@ -66,8 +68,11 @@ def _make_slot(lang, model_id):
 def _slot(lang):
     slot = _slots.get(lang)
     if slot is None:
-        slot = _make_slot(lang, MODEL_ES if lang == "es" else MODEL_EN)
-        _slots[lang] = slot
+        with _slots_lock:
+            slot = _slots.get(lang)
+            if slot is None:
+                slot = _make_slot(lang, MODEL_ES if lang == "es" else MODEL_EN)
+                _slots[lang] = slot
     return slot
 
 
@@ -231,7 +236,7 @@ def score_texts(texts, fallback_lang="es"):
     neutral/lang por texto). Lanza ModelBusyError sin VRAM (=> HTTP 503)
     o RuntimeError si los modelos fallan.
     """
-    for slot in _slots.values():
+    for slot in list(_slots.values()):
         slot.maybe_evict()
     pipes = {}
     adquiridos = []

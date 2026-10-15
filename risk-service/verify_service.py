@@ -7,6 +7,7 @@ None y el servicio sigue funcionando solo con la opción A.
 from __future__ import annotations
 
 import os
+import threading
 import logging
 from logging_utils import setup_service_logger
 
@@ -35,6 +36,7 @@ def is_english(text: str) -> bool:
 
 
 _slot = None
+_slot_lock = threading.Lock()
 
 
 def _load_pipe():
@@ -61,10 +63,15 @@ def _drop_pipe(pipe):
 
 def _get_slot():
     global _slot
-    if _slot is None:
-        _slot = ModelSlot(name="risk-verifier", vram_mb=VERIFY_VRAM_MB,
-                          load_fn=_load_pipe, unload_fn=_drop_pipe)
-    return _slot
+    slot = _slot
+    if slot is None:
+        with _slot_lock:
+            slot = _slot
+            if slot is None:
+                slot = ModelSlot(name="risk-verifier", vram_mb=VERIFY_VRAM_MB,
+                                 load_fn=_load_pipe, unload_fn=_drop_pipe)
+                _slot = slot
+    return slot
 
 
 def _get_pipe():
