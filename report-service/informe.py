@@ -14,6 +14,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
     Image,
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -280,12 +281,13 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
     for n, sec in enumerate(secciones, start=1):
         if n > 1:
             historia.append(Spacer(1, 0.6 * cm))
-        historia.append(Paragraph(f"{n}. {sec['titulo']}", h2))
+        cabeza = [Paragraph(f"{n}. {sec['titulo']}", h2)]
         if sec.get("descripcion"):
-            historia.append(Paragraph(sec["descripcion"], cuerpo))
+            cabeza.append(Paragraph(sec["descripcion"], cuerpo))
         if sec.get("metricas"):
-            historia.append(_tabla_metricas(sec["metricas"]))
-            historia.append(Spacer(1, 0.25 * cm))
+            cabeza.append(_tabla_metricas(sec["metricas"]))
+            cabeza.append(Spacer(1, 0.25 * cm))
+        historia.append(KeepTogether(cabeza))
         png_ok = False
         for png in sec.get("pngs_bytes", []):
             img = _imagen_bytes(png)
@@ -308,9 +310,14 @@ def componer_pdf(dataset: str, secciones: list[dict], omitidas: list[str] | None
                     historia.append(img)
                     historia.append(Spacer(1, 0.25 * cm))
         for titulo_tabla, encabezados, filas in sec.get("tablas_datos", []):
-            historia.append(Paragraph(_xml(str(titulo_tabla)), cuerpo))
-            historia.append(_tabla_datos(encabezados, filas))
-            historia.append(Spacer(1, 0.25 * cm))
+            partes = [filas[i:i + 25] for i in range(0, max(1, len(filas)), 25)] or [[]]
+            for j, parte in enumerate(partes):
+                nombre = str(titulo_tabla) if j == 0 else f"{titulo_tabla} (cont.)"
+                historia.append(KeepTogether([
+                    Paragraph(_xml(nombre), cuerpo),
+                    _tabla_datos(encabezados, parte),
+                    Spacer(1, 0.25 * cm),
+                ]))
         if sec.get("nota"):
             historia.append(Paragraph(f"<i>{sec['nota']}</i>", cuerpo))
 
