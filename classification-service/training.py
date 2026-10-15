@@ -126,15 +126,6 @@ def validar_tamano_muestras(y_labels, data: TrainingRequest):
     clase_minoritaria = int(conteos.min())
     cantidad_clases = len(conteos)
 
-    if data.modelo == "BERT" and data.modo == "validacion_cruzada":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "BERT se entrena con un único conjunto de entrenamiento y prueba. "
-                "Seleccioná 'Entrenamiento y Prueba' para BERT."
-            ),
-        )
-
     if data.modo == "validacion_cruzada":
         k_folds = data.k if data.k in [5, 10] else 5
 
@@ -394,6 +385,8 @@ MODELOS_BERT = {
     "es": "dccuchile/distilbert-base-spanish-uncased",
     "en": "distilbert-base-uncased",
     "es_base": "dccuchile/bert-base-spanish-wwm-uncased",
+    "en_base": "google-bert/bert-base-uncased",
+    "en_mental": "mental/mental-roberta-base",
 }
 
 _TOKENIZERS: dict = {}
@@ -452,46 +445,41 @@ def _ajustes_gpu() -> tuple[int, int, bool]:
 def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
     hiper = getattr(data, "hiperparametros", None) or {}
     pedido = str(hiper.get("bert_modelo", "auto") or "auto").lower()
-    if pedido in ("es", "en", "es_base"):
-        idioma = pedido if pedido in ("es", "en") else "es"
+    if pedido not in ("auto", "es_base", "en_mental"):
+        pedido = "auto"
+    if pedido in ("es_base", "en_mental"):
+        idioma = "en" if pedido == "en_mental" else "es"
         model_name = MODELOS_BERT[pedido]
     else:
         idioma = detectar_idioma(textos)
-        model_name = MODELOS_BERT.get(idioma, MODELOS_BERT["es"])
+        if DEVICE == "cuda":
+            model_name = MODELOS_BERT["en_base"] if idioma == "en" else MODELOS_BERT["es_base"]
+        else:
+            model_name = MODELOS_BERT.get(idioma, MODELOS_BERT["es"])
     modo_rapido = bool(hiper.get("bert_rapido", False))
     cantidad_clases = len(clases_nombres)
+    es_cv = (data.modo == "validacion_cruzada")
+    k_folds = data.k if data.k in [5, 10] else 5
+    y_list = list(y_labels)
 
     tokenizer = get_tokenizer(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=cantidad_clases,
-        id2label={int(v): k for k, v in label_mapping.items()},
-        label2id={k: int(v) for k, v in label_mapping.items()},
-    )
-    model.to(DEVICE)
-    if modo_rapido:
-        for n, p in model.named_parameters():
-            if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
-                p.requires_grad = False
+    model = None
+    if not es_cv:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=cantidad_clases,
+            id2label={int(v): k for k, v in label_mapping.items()},
+            label2id={k: int(v) for k, v in label_mapping.items()},
+        )
+        model.to(DEVICE)
+        if modo_rapido:
+            for n, p in model.named_parameters():
+                if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
+                    p.requires_grad = False
 
-    test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
-
-    x_train, x_test, y_train, y_test = train_test_split(
-        textos,
-        y_labels,
-        test_size=test_size,
-        stratify=y_labels,
-        random_state=42,
-    )
-
-    largos = sorted(len(t or "") for t in (x_train + x_test)) if (x_train + x_test) else [0]
+    largos = sorted(len(t or "") for t in textos) if textos else [0]
     p90 = largos[min(len(largos) - 1, int(len(largos) * 0.9))]
     max_len = 64 if p90 < 250 else 128
-    train_encodings = tokenizer(x_train, truncation=True, max_length=max_len)
-    test_encodings = tokenizer(x_test, truncation=True, max_length=max_len)
-
-    train_dataset = TextDataset(train_encodings, y_train)
-    test_dataset = TextDataset(test_encodings, y_test)
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
     epocas = 1 if (modo_rapido or len(textos) < 200) else 2
@@ -503,9 +491,23 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         except Exception:
             pass
 
-    try:
+    def _nuevo_modelo():
+        m = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=cantidad_clases,
+            id2label={int(v): k for k, v in label_mapping.items()},
+            label2id={k: int(v) for k, v in label_mapping.items()},
+        )
+        m.to(DEVICE)
+        if modo_rapido:
+            for n, p in m.named_parameters():
+                if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
+                    p.requires_grad = False
+        return m
+
+    def _args_en(tmp: str):
         args_deseados = {
-            "output_dir": temp_dir,
+            "output_dir": tmp,
             "num_train_epochs": epocas,
             "per_device_train_batch_size": bt,
             "per_device_eval_batch_size": be,
@@ -519,43 +521,92 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             "dataloader_pin_memory": DEVICE == "cuda",
             "report_to": "none",
         }
-
         soportados = set(inspect.signature(TrainingArguments.__init__).parameters)
         args_filtrados = {k: v for k, v in args_deseados.items() if k in soportados}
-
         if "eval_strategy" in args_filtrados and "evaluation_strategy" in args_filtrados:
             args_filtrados.pop("evaluation_strategy")
+        return TrainingArguments(**args_filtrados)
 
-        training_args = TrainingArguments(**args_filtrados)
+    def _entrenar_y_predecir(modelo, tr_enc, y_tr, te_enc, guardar_en=None):
+        tmp = tempfile.mkdtemp()
+        try:
+            trainer_kwargs = {
+                "model": modelo,
+                "args": _args_en(tmp),
+                "train_dataset": TextDataset(tr_enc, y_tr),
+                "eval_dataset": TextDataset(te_enc, [0] * len(te_enc["input_ids"])),
+                "data_collator": collator,
+            }
+            if "processing_class" in set(inspect.signature(Trainer.__init__).parameters):
+                trainer_kwargs["processing_class"] = tokenizer
+            else:
+                trainer_kwargs["tokenizer"] = tokenizer
+            tr = Trainer(**trainer_kwargs)
+            tr.train()
+            pred = tr.predict(TextDataset(te_enc, [0] * len(te_enc["input_ids"])))
+            yph = np.asarray(pred.predictions).argmax(axis=-1)
+            if guardar_en:
+                tr.save_model(guardar_en)
+                tokenizer.save_pretrained(guardar_en)
+            return yph, tr
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
-        trainer_kwargs = {
-            "model": model,
-            "args": training_args,
-            "train_dataset": train_dataset,
-            "eval_dataset": test_dataset,
-            "data_collator": collator,
-        }
-        if "processing_class" in set(inspect.signature(Trainer.__init__).parameters):
-            trainer_kwargs["processing_class"] = tokenizer
+    try:
+        model_dir = os.path.join(temp_dir, "modelo_bert")
+        if es_cv:
+            skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+            folds = list(skf.split(np.zeros(len(y_list)), np.asarray(y_list)))
+            y_pred_full = np.zeros(len(y_list), dtype=int)
+            for j, (tr_i, te_i) in enumerate(folds):
+                m = _nuevo_modelo()
+                try:
+                    yph, _ = _entrenar_y_predecir(
+                        m,
+                        tokenizer([textos[i] for i in tr_i], truncation=True, max_length=max_len),
+                        [y_list[i] for i in tr_i],
+                        tokenizer([textos[i] for i in te_i], truncation=True, max_length=max_len),
+                        guardar_en=model_dir if j == len(folds) - 1 else None,
+                    )
+                    y_pred_full[np.asarray(te_i)] = np.asarray(yph).ravel()
+                finally:
+                    try:
+                        del m
+                    except Exception:
+                        pass
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+            y_pred = y_pred_full
+            y_eval = np.asarray(y_list)
+            n_tr = n_te = len(y_list)
+            detalle_modo = f"validación cruzada (k={k_folds}, se guarda último pliegue)"
         else:
-            trainer_kwargs["tokenizer"] = tokenizer
-        trainer = Trainer(**trainer_kwargs)
-
-        trainer.train()
-
-        prediction = trainer.predict(test_dataset)
-        y_pred = np.asarray(prediction.predictions).argmax(axis=-1)
-        y_eval = np.asarray(y_test)
+            test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
+            x_train, x_test, y_train, y_test = train_test_split(
+                textos,
+                y_list,
+                test_size=test_size,
+                stratify=y_list,
+                random_state=42,
+            )
+            train_encodings = tokenizer(x_train, truncation=True, max_length=max_len)
+            test_encodings = tokenizer(x_test, truncation=True, max_length=max_len)
+            y_pred, trainer = _entrenar_y_predecir(
+                model, train_encodings, list(y_train), test_encodings,
+                guardar_en=model_dir,
+            )
+            y_eval = np.asarray(y_test)
+            n_tr, n_te = len(y_train), len(y_test)
+            detalle_modo = "porcentajes"
 
         (
             tp, fp, tn, fn,
             acc, f1, prec, rec,
             matriz,
         ) = calcular_metricas(y_eval, y_pred, cantidad_clases)
-
-        model_dir = os.path.join(temp_dir, "modelo_bert")
-        trainer.save_model(model_dir)
-        tokenizer.save_pretrained(model_dir)
 
         fecha = datetime.now(timezone.utc).isoformat()
         mapping_lines = "\n".join(
@@ -587,8 +638,9 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
 ## Configuración y métricas
 
-- Muestras de entrenamiento: **{len(y_train)}**
-- Muestras de evaluación: **{len(y_test)}**
+- Validación: **{detalle_modo}**
+- Muestras de entrenamiento: **{n_tr}**
+- Muestras de evaluación: **{n_te}**
 - Accuracy: **{acc:.4f}**
 - F1-score weighted: **{f1:.4f}**
 - Precision weighted: **{prec:.4f}**
@@ -671,6 +723,6 @@ pip install torch transformers accelerate
     return (
         tp, fp, tn, fn,
         acc, f1, prec, rec,
-        len(y_labels), len(y_train), len(y_test),
+        len(y_labels), n_tr, n_te,
         zip_buffer, matriz,
     )
