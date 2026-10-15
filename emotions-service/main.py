@@ -26,6 +26,7 @@ from supabase_service import (
 import logging
 from logging_utils import setup_service_logger
 import jobs
+from model_cache import ModelBusyError, warmup_enabled
 logger = setup_service_logger("emotions-service")
 
 
@@ -67,12 +68,15 @@ except Exception as e:
 async def lifespan(app: FastAPI):
 
     pass
-    try:
+    if not warmup_enabled():
+        logger.warning("[emotions-service] warmup omitido por WARMUP=false (carga lazy al primer uso).")
+    else:
+        try:
 
-        await asyncio.to_thread(get_emotion_pipeline)
-        pass
-    except Exception as e:
-        logger.exception(f"[emotions-service] warmup fallo (seguirá lazy en primera request): {e}")
+            await asyncio.to_thread(get_emotion_pipeline)
+            pass
+        except Exception as e:
+            logger.exception(f"[emotions-service] warmup fallo (seguirá lazy en primera request): {e}")
     yield
 
 app = FastAPI(title="Emotions Service", lifespan=lifespan)
@@ -357,7 +361,11 @@ async def start_analyze_emotions(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_emotions_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_emotions_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_emotions_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_emotions_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:
@@ -450,6 +458,9 @@ async def _compute_analyze_emotions(
         }
     except HTTPException:
         raise
+    except ModelBusyError as e:
+        logger.warning(f"[emotions-service] sin VRAM para emociones: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     except Exception as e:
         logger.exception(f"[emotions-service] Error al procesar emociones: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno al procesar emociones.")

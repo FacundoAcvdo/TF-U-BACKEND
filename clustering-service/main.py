@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import asyncio
 
 import jobs
+from model_cache import ModelBusyError, check_fits_or_raise
 
 from supabase_service import get_supabase_client, get_dataset_info, save_clustering_results, get_clustering_results
 from chromadb_service import get_dataset_embeddings
@@ -149,7 +150,11 @@ async def start_visualize_embeddings(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_cluster_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_cluster_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_cluster_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_cluster_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:
@@ -195,6 +200,11 @@ async def _compute_visualize_embeddings(
     x_user_id: str,
     x_user_token: str,
 ):
+    try:
+        check_fits_or_raise("clustering", 2000)
+    except ModelBusyError as e:
+        logger.warning(f"[clustering-service] sin VRAM: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     try:
         supabase = get_supabase_client(x_user_token)
 

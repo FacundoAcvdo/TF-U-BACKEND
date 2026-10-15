@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 import os
@@ -688,7 +689,11 @@ async def start_generar(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_report_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_report_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_report_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_report_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:

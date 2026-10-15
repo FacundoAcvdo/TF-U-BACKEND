@@ -426,11 +426,26 @@ def get_tokenizer(model_name: str):
 def _ajustes_gpu() -> tuple[int, int, bool]:
     try:
         mayor, _ = torch.cuda.get_device_capability(0)
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     except Exception:
         return 16, 32, True
     fp16 = mayor >= 7
-    batch = 32 if vram_gb >= 8 else 16
+    free_gb = 99.0
+    try:
+        free_b, _total_b = torch.cuda.mem_get_info(0)
+        free_gb = free_b / (1024 ** 3)
+    except Exception:
+        pass
+    if free_gb >= 6:
+        batch = 32
+    elif free_gb >= 3:
+        batch = 8
+    elif free_gb >= 1.5:
+        batch = 4
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio ocupado, intenta más tarde.",
+        )
     return batch, batch * 2, fp16
 
 
@@ -637,10 +652,19 @@ pip install torch transformers accelerate
         zip_buffer.seek(0)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        del model
         try:
+            del model
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
         except Exception:
             pass
 

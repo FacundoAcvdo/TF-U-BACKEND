@@ -1,9 +1,8 @@
-"""Scoring de emociones bilingue ES/EN (canonico).
+"""Scoring de emociones bilingue ES/EN.
 
-COPIAS IDENTICAS (servicios que levantan por separado):
-  - emotions-service/emotion_service.py
-  - evolution-service/emotions.py
-No editar las copias a mano: modificar este archivo y replicar.
+COPIAS IDENTICAS en emotions-service/emotion_service.py y
+evolution-service/emotions.py (levantan por separado): mantener
+sincronizadas a mano.
 
 Diseno:
   - Router por idioma: ES -> pysentimiento/robertuito-base-uncased-emotion,
@@ -19,6 +18,9 @@ import logging
 import re
 
 import numpy as np
+
+import model_cache
+from model_cache import ModelBusyError, ModelSlot
 
 logger = logging.getLogger("emotion-scoring")
 
@@ -43,7 +45,30 @@ _MENTION_RE = re.compile(r"@\w+")
 _HASHTAG_RE = re.compile(r"#(\w+)")
 _REPEAT_RE = re.compile(r"(.)\1{2,}")
 
-_pipes = {}
+_slots = {}
+_SLOT_VRAM_MB = {"es": 1200, "en": 800}
+
+
+def _make_slot(lang, model_id):
+    def _load():
+        return _load_pipe(model_id)
+
+    def _unload(pipe):
+        try:
+            del pipe
+        except Exception:
+            pass
+
+    return ModelSlot(name=f"emociones-{lang}", vram_mb=_SLOT_VRAM_MB[lang],
+                     load_fn=_load, unload_fn=_unload)
+
+
+def _slot(lang):
+    slot = _slots.get(lang)
+    if slot is None:
+        slot = _make_slot(lang, MODEL_ES if lang == "es" else MODEL_EN)
+        _slots[lang] = slot
+    return slot
 
 
 def _detect_device():
@@ -76,25 +101,36 @@ def _load_pipe(model_id):
 
 
 def get_emotion_pipeline():
-    """Carga (una vez) ambos modelos y corre un probe bilingue.
+    """Asegura ambos modelos cargados y corre un probe bilingue.
 
-    Lanza RuntimeError si algo falla: sin modelo no hay scores.
+    Lanza ModelBusyError sin VRAM (=> HTTP 503) o RuntimeError si falla
+    la carga (sin dummy, sin scores random).
     """
-    global _pipes
-    for lang, model_id in (("es", MODEL_ES), ("en", MODEL_EN)):
-        if lang not in _pipes:
-            try:
-                _pipes[lang] = _load_pipe(model_id)
-            except Exception as e:
-                logger.error(f"[emotion-scoring] no se pudo cargar {model_id}: {e}")
-                raise RuntimeError(f"No se pudo cargar el modelo de emociones ({lang}).") from e
+    pipes = {}
+    adquiridos = []
     try:
-        _pipes["es"](["Estoy muy contento hoy."], truncation=True, max_length=512)
-        _pipes["en"](["I am very happy today."], truncation=True, max_length=512)
-    except Exception as e:
-        logger.error(f"[emotion-scoring] fallo el probe de modelos: {e}")
-        raise RuntimeError("Fallo la verificacion de los modelos de emociones.") from e
-    return _pipes
+        for lang in ("es", "en"):
+            slot = _slot(lang)
+            try:
+                pipes[lang] = slot.get()
+            except ModelBusyError:
+                raise
+            except Exception as e:
+                logger.error(f"[emotion-scoring] no se pudo cargar {lang}: {e}")
+                raise RuntimeError(
+                    f"No se pudo cargar el modelo de emociones ({lang}).") from e
+            adquiridos.append(slot)
+        ml_es = _pipe_max_len(pipes["es"])
+        ml_en = _pipe_max_len(pipes["en"])
+        pipes["es"](["Estoy muy contento hoy."], truncation=True, max_length=ml_es)
+        pipes["en"](["I am very happy today."], truncation=True, max_length=ml_en)
+    finally:
+        for slot in adquiridos:
+            try:
+                slot.release()
+            except Exception:
+                pass
+    return pipes
 
 
 def _detect_lang(text):
@@ -192,9 +228,28 @@ def score_texts(texts, fallback_lang="es"):
     """Puntua una lista de textos.
 
     Devuelve (scores (n,6) float32, meta dict con dominant/confidence/
-    neutral/lang por texto). Lanza RuntimeError si los modelos fallan.
+    neutral/lang por texto). Lanza ModelBusyError sin VRAM (=> HTTP 503)
+    o RuntimeError si los modelos fallan.
     """
-    pipes = get_emotion_pipeline()
+    for slot in _slots.values():
+        slot.maybe_evict()
+    pipes = {}
+    adquiridos = []
+    try:
+        for lang in ("es", "en"):
+            slot = _slot(lang)
+            pipes[lang] = slot.get()
+            adquiridos.append(slot)
+        return _score_inner(texts, pipes, fallback_lang)
+    finally:
+        for slot in adquiridos:
+            try:
+                slot.release()
+            except Exception:
+                pass
+
+
+def _score_inner(texts, pipes, fallback_lang="es"):
     corpus_lang = detect_corpus_language(texts)
     corpus_default = corpus_lang if corpus_lang in ("es", "en") else fallback_lang
 
