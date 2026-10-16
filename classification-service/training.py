@@ -23,6 +23,7 @@ from sklearn.model_selection import (
     cross_val_predict,
     train_test_split,
 )
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import LinearSVC
@@ -38,6 +39,26 @@ from core import DEVICE, EMBEDDING_MODEL_NAME
 from schemas import TrainingRequest
 
 MAX_CLASES = int(os.environ.get("MAX_CLASES", 7))
+
+
+class _WeightedTrainer(Trainer):
+    """Trainer con CrossEntropy ponderada por clase (desbalance 65/35)."""
+
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        etiquetas = inputs.get("labels")
+        resto = {k: v for k, v in inputs.items() if k != "labels"}
+        salidas = model(**resto)
+        logits = salidas.logits if hasattr(salidas, "logits") else salidas[0]
+        peso = None
+        if self._class_weights is not None:
+            peso = self._class_weights.to(logits.device)
+        import torch.nn.functional as _F
+        perdida = _F.cross_entropy(logits, etiquetas, weight=peso)
+        return (perdida, salidas) if return_outputs else perdida
 
 def _flotante(v, default: float, lo: float, hi: float) -> float:
     try:
@@ -476,7 +497,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
     largos = sorted(len(t or "") for t in textos) if textos else [0]
     p90 = largos[min(len(largos) - 1, int(len(largos) * 0.9))]
-    max_len = 64 if p90 < 250 else 128
+    max_len = 128 if p90 < 250 else 256
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
     if modo_rapido:
@@ -484,7 +505,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
     elif len(textos) < 200:
         epocas = 1
     else:
-        epocas = 3
+        epocas = 4
     temp_dir = tempfile.mkdtemp()
     bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
     if DEVICE == "cuda":
@@ -513,9 +534,15 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             "num_train_epochs": epocas,
             "per_device_train_batch_size": bt,
             "per_device_eval_batch_size": be,
-            "eval_strategy": "no",
-            "evaluation_strategy": "no",
-            "save_strategy": "no",
+            "eval_strategy": "epoch",
+            "evaluation_strategy": "epoch",
+            "save_strategy": "epoch",
+            "save_total_limit": 1,
+            "load_best_model_at_end": True,
+            "metric_for_best_model": "eval_loss",
+            "greater_is_better": False,
+            "learning_rate": 2e-5,
+            "warmup_ratio": 0.1,
             "use_cpu": DEVICE == "cpu",
             "fp16": usar_fp16,
             "weight_decay": 0.01,
@@ -530,9 +557,22 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             args_filtrados.pop("evaluation_strategy")
         return TrainingArguments(**args_filtrados)
 
+    historial_loss: list[str] = []
+
     def _entrenar_y_predecir(modelo, tr_enc, y_tr, te_enc, guardar_en=None):
         tmp = tempfile.mkdtemp()
         try:
+            clases_ord = sorted(set(int(v) for v in y_tr))
+            conteo = compute_class_weight(
+                "balanced",
+                classes=np.asarray(clases_ord),
+                y=np.asarray(y_tr, dtype=int),
+            )
+            por_indice = {c: w for c, w in zip(clases_ord, conteo)}
+            pesos = torch.tensor(
+                [por_indice.get(c, 1.0) for c in range(cantidad_clases)],
+                dtype=torch.float32,
+            )
             trainer_kwargs = {
                 "model": modelo,
                 "args": _args_en(tmp),
@@ -544,8 +584,17 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
                 trainer_kwargs["processing_class"] = tokenizer
             else:
                 trainer_kwargs["tokenizer"] = tokenizer
-            tr = Trainer(**trainer_kwargs)
+            tr = _WeightedTrainer(class_weights=pesos, **trainer_kwargs)
             tr.train()
+            perdidas_ent = [h.get("loss") for h in tr.state.log_history if h.get("loss") is not None]
+            perdidas_val = [h.get("eval_loss") for h in tr.state.log_history if h.get("eval_loss") is not None]
+            historial_loss.append(
+                f"- corrida {len(historial_loss) + 1}: "
+                f"loss_entrenamiento={perdidas_ent[-1]:.4f} "
+                f"loss_validacion={perdidas_val[-1]:.4f}"
+                if perdidas_ent and perdidas_val else
+                f"- corrida {len(historial_loss) + 1}: sin registros de pérdida"
+            )
             pred = tr.predict(TextDataset(te_enc, [0] * len(te_enc["input_ids"])))
             yph = np.asarray(pred.predictions).argmax(axis=-1)
             if guardar_en:
@@ -612,6 +661,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         ) = calcular_metricas(y_eval, y_pred, cantidad_clases)
 
         fecha = datetime.now(timezone.utc).isoformat()
+        lineas_loss = "\n".join(historial_loss) if historial_loss else "- Sin registros."
         mapping_lines = "\n".join(
             f"- `{clase}` → `{idx}`"
             for clase, idx in label_mapping.items()
@@ -648,6 +698,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 - F1-score weighted: **{f1:.4f}**
 - Precision weighted: **{prec:.4f}**
 - Recall weighted: **{rec:.4f}**
+
+## Pérdida por corrida (divergencias a la vista)
+
+{lineas_loss}
 
 ## Mapeo de clases
 
