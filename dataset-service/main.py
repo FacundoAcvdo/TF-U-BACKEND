@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 import os
@@ -42,6 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from logging_utils import setup_service_logger
 import jobs
+from model_cache import ModelBusyError
 
 settings = get_settings()
 
@@ -303,7 +305,11 @@ async def start_upload(
     return {"job_id": job["job_id"], "status": "queued", "filename": archivo.filename}
 
 
-async def _run_upload_job(job_id: str, content: bytes, params: dict, user_id: str, user_token: str):
+def _run_upload_job(job_id: str, content: bytes, params: dict, user_id: str, user_token: str):
+    asyncio.run(_run_upload_job_async(job_id, content, params, user_id, user_token))
+
+
+async def _run_upload_job_async(job_id: str, content: bytes, params: dict, user_id: str, user_token: str):
     """Procesa la carga en background (parse + embeddings + Chroma)."""
     supabase = supabase_repository.get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
@@ -340,6 +346,10 @@ async def _run_upload_job(job_id: str, content: bytes, params: dict, user_id: st
     except HTTPException as e:
         logger.warning(f"[dataset-service] job {job_id} fallo | code={e.status_code} detail={e.detail}")
         jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except ModelBusyError as e:
+        logger.warning(f"[dataset-service] job {job_id} sin VRAM: {e}")
+        jobs.mark_failed(supabase, job_id, 503, "Servicio ocupado, intenta más tarde.")
         return
     except ValueError as exc:
         logger.exception(

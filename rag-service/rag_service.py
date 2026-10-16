@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import threading
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
@@ -46,7 +47,12 @@ NO_EVIDENCE_MSG = (
 
 DOCS_PATH = os.environ.get("DOCS_PATH", "/app/data/rag_docs")
 
+RAG_EMB_VRAM_MB = int(os.environ.get("RAG_EMB_VRAM_MB", "800"))
+
 RAG_INIT_ON_STARTUP = os.environ.get("RAG_INIT_ON_STARTUP", "false").lower() in ("true", "1", "yes", "on")
+
+import model_cache
+from model_cache import ModelBusyError, ModelSlot, warmup_enabled
 
 
 RAG_DOCS_COLLECTION = os.environ.get("CHROMA_COLLECTION", "rag_docs")
@@ -109,6 +115,25 @@ class E5Embeddings(HuggingFaceEmbeddings):
         return super().embed_query(f"{self.query_prefix}{text}")
 
 
+class _LazyE5Embeddings:
+    """Proxy con prefijos E5 que resuelve el modelo via slot (lazy+TTL)."""
+
+    def __init__(self, service):
+        self._service = service
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        slot = self._service._get_emb_slot()
+        slot.maybe_evict()
+        with slot.use() as emb:
+            return emb.embed_documents(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        slot = self._service._get_emb_slot()
+        slot.maybe_evict()
+        with slot.use() as emb:
+            return emb.embed_query(text)
+
+
 class RAGService:
     def __init__(self):
         self.embeddings = None
@@ -117,15 +142,42 @@ class RAGService:
         self.stores: Dict[str, Chroma] = {}
         self.prompts: Dict[str, ChatPromptTemplate] = {}
         self._initialized = False
+        self._emb_slot = None
+        self._emb_slot_lock = threading.Lock()
+        self._lazy_e5 = _LazyE5Embeddings(self)
 
 
-    def _init_embeddings(self):
+    def _get_emb_slot(self):
+        slot = self._emb_slot
+        if slot is None:
+            with self._emb_slot_lock:
+                slot = self._emb_slot
+                if slot is None:
+                    service = self
+
+                    def _load():
+                        return service._build_embeddings()
+
+                    def _drop(emb):
+                        try:
+                            del emb
+                        except Exception:
+                            pass
+
+                    slot = ModelSlot(
+                        name="rag-e5", vram_mb=RAG_EMB_VRAM_MB,
+                        load_fn=_load, unload_fn=_drop)
+                    self._emb_slot = slot
+        return slot
+
+
+    def _build_embeddings(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_kwargs: dict = {"device": device}
         if device == "cuda":
             model_kwargs["torch_dtype"] = torch.float16
         try:
-            self.embeddings = E5Embeddings(
+            return E5Embeddings(
                 model_name=EMBEDDING_MODEL,
                 model_kwargs=model_kwargs,
                 encode_kwargs={
@@ -135,7 +187,7 @@ class RAGService:
             )
         except Exception as e:
             logger.warning(f"[rag_service] no se pudo usar fp16, se usa fp32: {e}")
-            self.embeddings = E5Embeddings(
+            return E5Embeddings(
                 model_name=EMBEDDING_MODEL,
                 model_kwargs={"device": device},
                 encode_kwargs={
@@ -143,6 +195,17 @@ class RAGService:
                     "batch_size": EMBEDDING_BATCH_SIZE,
                 },
             )
+
+
+    def _init_embeddings(self):
+        self._get_emb_slot()
+        if warmup_enabled():
+            slot = self._get_emb_slot()
+            slot.maybe_evict()
+            with slot.use():
+                logger.warning("[rag_service] embeddings precargados por warmup.")
+        else:
+            logger.warning("[rag_service] warmup omitido por WARMUP=false (carga lazy al primer uso).")
 
 
     def _init_llm(self):
@@ -180,7 +243,7 @@ class RAGService:
             self.stores[key] = Chroma(
                 client=self.chroma_client,
                 collection_name=coll_name,
-                embedding_function=self.embeddings,
+                embedding_function=self._lazy_e5,
             )
 
             template = PROMPTS.get(key)

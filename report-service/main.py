@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 import os
@@ -508,7 +509,7 @@ def construir_riesgo(d: dict) -> dict:
     top_items = d.get("top_items", []) or []
     if isinstance(top_items, list) and top_items:
         filas_top = []
-        for it in top_items[:30]:
+        for it in top_items[:3]:
             if not isinstance(it, dict):
                 continue
             texto = str(it.get("texto", ""))
@@ -626,11 +627,26 @@ def construir_resumen(dataset: str, fuentes: dict) -> dict:
     evo = fuentes.get("evolucion")
     if isinstance(evo, dict):
         metricas.append(("Evoluciones guardadas", str(len(evo.get("filas", []) or []))))
+    sen = fuentes.get("sentimiento")
+    if isinstance(sen, dict):
+        metricas.append(("Evoluciones de sentimiento", str(len(sen.get("filas", []) or []))))
+    top = fuentes.get("topicos")
+    if isinstance(top, dict):
+        metricas.append(("Tópicos", f"{top.get('topic_count', '?')} sobre {top.get('document_count', '?')} documentos"))
+    rac = fuentes.get("chats")
+    if isinstance(rac, dict):
+        metricas.append(("Chats analizados",
+                         f"{rac.get('total_chats', '?')} con {rac.get('total_mensajes', '?')} mensajes"))
+    rgo = fuentes.get("riesgo")
+    if isinstance(rgo, dict):
+        res = rgo.get("resumen", {}) or {}
+        metricas.append(("Riesgo · casos", str(res.get("total", "?"))))
+        metricas.append(("Riesgo · alto + potencial", f"{res.get('pct_alto_potencial', '?')}%"))
     if not metricas:
         metricas.append(("Dataset", dataset))
     return {
         "titulo": "Resumen ejecutivo",
-        "descripcion": "Hallazgos principales del análisis realizado sobre el dataset.",
+        "descripcion": "Síntesis de los análisis incluidos en este informe.",
         "metricas": metricas,
         "graficos": [],
     }
@@ -688,7 +704,11 @@ async def start_generar(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_report_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_report_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_report_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_report_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:

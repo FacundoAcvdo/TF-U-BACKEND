@@ -25,6 +25,7 @@ from supabase_service import (
 )
 import logging
 from logging_utils import setup_service_logger
+from model_cache import ModelBusyError
 logger = setup_service_logger("rag-service")
 
 
@@ -195,6 +196,9 @@ async def send_message(
     except RuntimeError as re:
         logger.exception(f"[main] RAG RuntimeError: {re}")
         raise HTTPException(status_code=503, detail="Servicio RAG no disponible. Intenta más tarde.")
+    except ModelBusyError as e:
+        logger.warning(f"[main] sin VRAM para RAG: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.")
     except Exception as e:
         logger.exception(f"[main] RAG query error: {e}")
         raise HTTPException(status_code=500, detail="Error interno RAG.")

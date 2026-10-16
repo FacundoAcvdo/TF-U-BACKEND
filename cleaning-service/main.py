@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from typing import Annotated
@@ -122,7 +123,11 @@ async def start_cleaning(
     return {"job_id": job["job_id"], "status": "queued", "dataset": request.dataset_name}
 
 
-async def _run_clean_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_clean_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_clean_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_clean_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = supabase_service.get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:

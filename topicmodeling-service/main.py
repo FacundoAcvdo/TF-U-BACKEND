@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from typing import Annotated
@@ -23,6 +24,7 @@ from topic_modeling_provider import TopicModelingProvider
 import logging
 from logging_utils import setup_service_logger
 import jobs
+from model_cache import ModelBusyError, check_fits_or_raise
 logger = setup_service_logger("topicmodeling-service")
 
 
@@ -106,7 +108,11 @@ async def start_get_topics(
     return {"job_id": job["job_id"], "status": "queued", "dataset": dataset}
 
 
-async def _run_topics_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_topics_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_topics_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_topics_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = supabase_service.get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:
@@ -156,6 +162,11 @@ async def _compute_get_topics(
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
 ):
+    try:
+        check_fits_or_raise("topicmodeling", 2000)
+    except ModelBusyError as e:
+        logger.warning(f"[topicmodeling] sin VRAM: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     try:
         resultado = await topic_modeling_service.get_topics(
             dataset_name=dataset,

@@ -21,6 +21,7 @@ from emotions import EMOTIONS, get_emotion_pipeline, predecir_emociones_textos, 
 import logging
 from logging_utils import setup_service_logger
 import jobs
+from model_cache import ModelBusyError, warmup_enabled
 logger = setup_service_logger("evolution-service")
 
 
@@ -75,10 +76,13 @@ OBJETIVO_BLOQUES = 10
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        await asyncio.to_thread(get_emotion_pipeline)
-    except Exception as e:
-        logger.warning(f"[evolution-service] warmup pipeline emociones fallo (seguira lazy en primera request): {e}")
+    if not warmup_enabled():
+        logger.warning("[evolution-service] warmup omitido por WARMUP=false (carga lazy al primer uso).")
+    else:
+        try:
+            await asyncio.to_thread(get_emotion_pipeline)
+        except Exception as e:
+            logger.warning(f"[evolution-service] warmup pipeline emociones fallo (seguira lazy en primera request): {e}")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -444,7 +448,11 @@ async def start_word_evolution(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_word_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_word_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_word_evolution_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_word_evolution_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:
@@ -576,6 +584,9 @@ async def _compute_word_evolution(
 
     except HTTPException:
         raise
+    except ModelBusyError as e:
+        logger.warning(f"[evolution-service] sin VRAM para evolucion de palabras: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     except Exception as e:
         logger.exception(f"Error al calcular evolución de palabras: {str(e)}")
         raise HTTPException(
@@ -704,7 +715,11 @@ async def start_emotions_evolution(
     return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
 
 
-async def _run_emotions_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+def _run_emotions_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_emotions_evolution_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_emotions_evolution_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
     supabase = get_supabase_client(user_token)
     jobs.mark_running(supabase, job_id)
     try:
@@ -809,6 +824,9 @@ async def _compute_emotions_evolution(
 
     except HTTPException:
         raise
+    except ModelBusyError as e:
+        logger.warning(f"[evolution-service] sin VRAM para evolucion de emociones: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     except Exception as e:
         logger.exception(f"Error al calcular evolución de emociones: {str(e)}")
         raise HTTPException(
