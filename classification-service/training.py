@@ -31,6 +31,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     DataCollatorWithPadding,
+    EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
 )
@@ -450,7 +451,7 @@ def _ajustes_gpu() -> tuple[int, int, bool]:
     except Exception:
         pass
     if free_gb >= 6:
-        batch = 32
+        batch = 16
     elif free_gb >= 3:
         batch = 8
     elif free_gb >= 1.5:
@@ -497,15 +498,21 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
     largos = sorted(len(t or "") for t in textos) if textos else [0]
     p90 = largos[min(len(largos) - 1, int(len(largos) * 0.9))]
-    max_len = 128 if p90 < 250 else 256
+    max_len = 256
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
-    if modo_rapido:
+    try:
+        epocas_pedidas = int(float(hiper.get("bert_epocas", 0) or 0))
+    except (TypeError, ValueError):
+        epocas_pedidas = 0
+    if epocas_pedidas >= 1:
+        epocas = max(1, min(30, epocas_pedidas))
+    elif modo_rapido:
         epocas = 10
-    elif len(textos) < 200:
-        epocas = 1
+    elif len(textos) < 2000:
+        epocas = 15
     else:
-        epocas = 4
+        epocas = 8
     temp_dir = tempfile.mkdtemp()
     bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
     if DEVICE == "cuda":
@@ -529,6 +536,11 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         return m
 
     def _args_en(tmp: str):
+        try:
+            lr_pedida = float(hiper.get("bert_lr", 0) or 0)
+        except (TypeError, ValueError):
+            lr_pedida = 0.0
+        lr = lr_pedida if 1e-6 <= lr_pedida <= 2e-4 else 5e-5
         args_deseados = {
             "output_dir": tmp,
             "num_train_epochs": epocas,
@@ -536,17 +548,19 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             "per_device_eval_batch_size": be,
             "eval_strategy": "epoch",
             "evaluation_strategy": "epoch",
+            "logging_strategy": "epoch",
+            "logging_steps": 50,
             "save_strategy": "epoch",
             "save_total_limit": 1,
             "load_best_model_at_end": True,
-            "metric_for_best_model": "eval_loss",
-            "greater_is_better": False,
-            "learning_rate": 2e-5,
-            "warmup_ratio": 0.1,
+            "metric_for_best_model": "eval_f1",
+            "greater_is_better": True,
+            "learning_rate": lr,
+            "warmup_ratio": 0.06,
             "use_cpu": DEVICE == "cpu",
             "fp16": usar_fp16,
-            "weight_decay": 0.01,
-            "group_by_length": True,
+            "weight_decay": 0.0,
+            "group_by_length": False,
             "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
             "dataloader_pin_memory": DEVICE == "cuda",
             "report_to": "none",
@@ -559,7 +573,15 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
     historial_loss: list[str] = []
 
-    def _entrenar_y_predecir(modelo, tr_enc, y_tr, te_enc, guardar_en=None):
+    def _metricas_trainer(p):
+        y_predicha = np.asarray(p.predictions).argmax(axis=-1)
+        y_reales = np.asarray(p.label_ids)
+        return {
+            "accuracy": float(accuracy_score(y_reales, y_predicha)),
+            "f1": float(f1_score(y_reales, y_predicha, average="weighted", zero_division=0)),
+        }
+
+    def _entrenar_y_predecir(modelo, tr_enc, y_tr, te_enc, y_te, guardar_en=None):
         tmp = tempfile.mkdtemp()
         try:
             clases_ord = sorted(set(int(v) for v in y_tr))
@@ -577,8 +599,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
                 "model": modelo,
                 "args": _args_en(tmp),
                 "train_dataset": TextDataset(tr_enc, y_tr),
-                "eval_dataset": TextDataset(te_enc, [0] * len(te_enc["input_ids"])),
+                "eval_dataset": TextDataset(te_enc, list(y_te)),
                 "data_collator": collator,
+                "compute_metrics": _metricas_trainer,
+                "callbacks": [EarlyStoppingCallback(early_stopping_patience=3)],
             }
             if "processing_class" in set(inspect.signature(Trainer.__init__).parameters):
                 trainer_kwargs["processing_class"] = tokenizer
@@ -588,14 +612,20 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             tr.train()
             perdidas_ent = [h.get("loss") for h in tr.state.log_history if h.get("loss") is not None]
             perdidas_val = [h.get("eval_loss") for h in tr.state.log_history if h.get("eval_loss") is not None]
+            f1_val = [h.get("eval_f1") for h in tr.state.log_history if h.get("eval_f1") is not None]
             historial_loss.append(
+                f"- corrida {len(historial_loss) + 1}: "
+                f"loss_entrenamiento={perdidas_ent[-1]:.4f} "
+                f"loss_validacion={perdidas_val[-1]:.4f} "
+                f"f1_validacion={f1_val[-1]:.4f}"
+                if perdidas_ent and perdidas_val and f1_val else
                 f"- corrida {len(historial_loss) + 1}: "
                 f"loss_entrenamiento={perdidas_ent[-1]:.4f} "
                 f"loss_validacion={perdidas_val[-1]:.4f}"
                 if perdidas_ent and perdidas_val else
                 f"- corrida {len(historial_loss) + 1}: sin registros de pérdida"
             )
-            pred = tr.predict(TextDataset(te_enc, [0] * len(te_enc["input_ids"])))
+            pred = tr.predict(TextDataset(te_enc, list(y_te)))
             yph = np.asarray(pred.predictions).argmax(axis=-1)
             if guardar_en:
                 tr.save_model(guardar_en)
@@ -618,6 +648,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
                         tokenizer([textos[i] for i in tr_i], truncation=True, max_length=max_len),
                         [y_list[i] for i in tr_i],
                         tokenizer([textos[i] for i in te_i], truncation=True, max_length=max_len),
+                        [y_list[i] for i in te_i],
                         guardar_en=model_dir if j == len(folds) - 1 else None,
                     )
                     y_pred_full[np.asarray(te_i)] = np.asarray(yph).ravel()
@@ -647,7 +678,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             train_encodings = tokenizer(x_train, truncation=True, max_length=max_len)
             test_encodings = tokenizer(x_test, truncation=True, max_length=max_len)
             y_pred, trainer = _entrenar_y_predecir(
-                model, train_encodings, list(y_train), test_encodings,
+                model, train_encodings, list(y_train), test_encodings, list(y_test),
                 guardar_en=model_dir,
             )
             y_eval = np.asarray(y_test)
