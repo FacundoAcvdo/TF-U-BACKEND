@@ -437,10 +437,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         model_name = MODELOS_BERT[pedido]
     else:
         idioma = detectar_idioma(textos)
-        if DEVICE == "cuda":
-            model_name = MODELOS_BERT["en_base"] if idioma == "en" else MODELOS_BERT["es_base"]
-        else:
-            model_name = MODELOS_BERT.get(idioma, MODELOS_BERT["es"])
+        model_name = MODELOS_BERT["en_mental"] if idioma == "en" else MODELOS_BERT["es_base"]
     modo_rapido = bool(hiper.get("bert_rapido", False))
     cantidad_clases = len(clases_nombres)
     es_cv = (data.modo == "validacion_cruzada")
@@ -467,7 +464,12 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
     max_len = 64 if p90 < 250 else 128
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
-    epocas = 1 if (modo_rapido or len(textos) < 200) else 2
+    if modo_rapido:
+        epocas = 10
+    elif len(textos) < 200:
+        epocas = 1
+    else:
+        epocas = 3
     temp_dir = tempfile.mkdtemp()
     bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
     if DEVICE == "cuda":
@@ -501,6 +503,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             "save_strategy": "no",
             "use_cpu": DEVICE == "cpu",
             "fp16": usar_fp16,
+            "weight_decay": 0.01,
             "group_by_length": True,
             "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
             "dataloader_pin_memory": DEVICE == "cuda",
