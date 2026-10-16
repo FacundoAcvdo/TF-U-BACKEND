@@ -14,6 +14,10 @@ Reglas:
 - get(): si hay lugar (admision) y no esta cargado, carga con single-flight.
 - Sin lugar -> ModelBusyError (el caller lo mapea a HTTP 503).
 - maybe_evict(): descarga si refcount==0 y pasaron MODEL_TTL_SECONDS sin uso.
+- Cada ModelSlot corre un hilo daemon que llama a maybe_evict() cada
+  MODEL_EVICT_POLL_SECONDS (defecto: min(30, TTL/2)). Sin este hilo la
+  liberacion solo ocurria en release()/proxima request y la VRAM quedaba
+  ocupada indefinidamente en idle (bug 2026-10-16).
 - WARMUP=false en el servicio => no precargar al arrancar (lazy igual).
 """
 import gc
@@ -60,7 +64,14 @@ def cuda_cleanup():
     try:
         import torch
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
             try:
                 torch.cuda.ipc_collect()
             except Exception:
@@ -68,6 +79,60 @@ def cuda_cleanup():
     except Exception:
         pass
     gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _free_gpu_object(obj):
+    """Intento best-effort de bajar a CPU los pesos antes de soltar la ref.
+
+    `del pipe` dentro de un unload_fn NO libera nada por si solo (solo borra
+    el nombre local del argumento). Lo que libera es soltar TODAS las refs
+    (slot._model=None + gc) + empty_cache. Mover a CPU primero reduce la
+           memoria pico retenida por el caching allocator.
+    """
+    try:
+        inner = getattr(obj, "model", None)
+        if inner is not None:
+            for meth in ("to", "cpu"):
+                try:
+                    if meth == "to":
+                        inner.to("cpu")
+                    else:
+                        fn = getattr(inner, "cpu", None)
+                        if callable(fn):
+                            fn()
+                    break
+                except Exception:
+                    continue
+        for meth in ("to", "cpu"):
+            try:
+                if meth == "to":
+                    fn = getattr(obj, "to", None)
+                    if callable(fn):
+                        fn("cpu")
+                else:
+                    fn = getattr(obj, "cpu", None)
+                    if callable(fn):
+                        fn()
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    for attr in ("model", "_model", "backend_model", "pipe"):
+        try:
+            if hasattr(obj, attr):
+                setattr(obj, attr, None)
+        except Exception:
+            pass
 
 
 class ModelBusyError(RuntimeError):
@@ -86,6 +151,9 @@ class ModelSlot:
         self._model = None
         self._users = 0
         self._last_used = 0.0
+        self._stop_evictor = False
+        self._evictor = None
+        self._start_evictor()
 
     @property
     def loaded(self):
@@ -128,13 +196,26 @@ class ModelSlot:
         idle = time.perf_counter() - self._last_used
         if idle < ttl_seconds():
             return False
+        # Soltar la ref del slot ANTES de llamar al unload_fn: `del pipe`
+        # dentro del unload solo borra el nombre local, asi que el objeto
+        # se liberaria recien al hacer self._model=None despues. Separando
+        # la ref primero, el unload + _free_gpu_object trabajan sobre el
+        # ultimo dueño real y el empty_cache posterior si devuelve a nvidia-smi.
+        model = self._model
+        self._model = None
         try:
             if self._unload_fn is not None:
-                self._unload_fn(self._model)
-        except Exception as e:
-            logger.warning(f"[model-cache] fallo descargando {self.name}: {e}")
-        self._model = None
-        cuda_cleanup()
+                try:
+                    self._unload_fn(model)
+                except Exception as e:
+                    logger.warning(f"[model-cache] fallo descargando {self.name}: {e}")
+            _free_gpu_object(model)
+        finally:
+            try:
+                del model
+            except Exception:
+                pass
+            cuda_cleanup()
         logger.warning(f"[model-cache] {self.name} liberado tras {idle:.0f}s sin uso.")
         return True
 
@@ -145,6 +226,47 @@ class ModelSlot:
     def touch(self):
         with self._lock:
             self._last_used = time.perf_counter()
+
+    def _poll_seconds(self):
+        try:
+            forced = int(os.environ.get("MODEL_EVICT_POLL_SECONDS", "0"))
+            if forced > 0:
+                return max(1, forced)
+        except (TypeError, ValueError):
+            pass
+        try:
+            ttl = int(ttl_seconds())
+        except Exception:
+            ttl = 600
+        if ttl <= 0:
+            return 5
+        return max(5, min(30, ttl // 2 if ttl >= 10 else 5))
+
+    def _start_evictor(self):
+        # Hilo daemon por slot: sin esto, maybe_evict() solo se llamaba en
+        # release() (idle ~0s, nunca >= TTL) y al inicio de la SIGUIENTE
+        # inferencia. Resultado: sin trafico nuevo, la VRAM jamas se liberaba.
+        if self._evictor is not None:
+            return
+        def _loop():
+            while not self._stop_evictor:
+                try:
+                    time.sleep(self._poll_seconds())
+                except Exception:
+                    time.sleep(5)
+                try:
+                    self.maybe_evict()
+                except Exception:
+                    pass
+        try:
+            t = threading.Thread(target=_loop, name=f"evict-{self.name}", daemon=True)
+            t.start()
+            self._evictor = t
+        except Exception as e:
+            logger.warning(f"[model-cache] no se pudo iniciar evictor de {self.name}: {e}")
+
+    def stop_evictor(self):
+        self._stop_evictor = True
 
     def use(self):
         """Context manager: with slot.use() as modelo: ..."""
