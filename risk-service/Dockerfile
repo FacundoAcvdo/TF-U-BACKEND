@@ -29,4 +29,4 @@ COPY . .
 
 EXPOSE 8091
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8091"]
+CMD ["uvicorn", "--no-access-log", "main:app", "--host", "0.0.0.0", "--port", "8091"]

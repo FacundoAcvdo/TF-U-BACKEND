@@ -96,7 +96,7 @@ class ChromaRepository:
             if embeddings is not None:
                 payload["embeddings"] = embeddings[i:fin]
 
-            # Inserción en Chroma
+
             self._get_collection(collection_name).add(**payload)
 
     def delete_documents_by_dataset(

@@ -33,20 +33,23 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("risk-service")
+
 
 ARTIFACTS_DIR = Path(__file__).parent / "model_artifacts"
 
-# Umbrales fijos del proyecto: P(suicidio) -> nivel
+
 THRESHOLDS = {
     "alto": 0.85,
     "potencial": 0.65,
     "medio": 0.40,
     "bajo": 0.15,
-    # <0.15 = nulo
+
 }
 
-# Semillas ES mínimas para que la cabeza no sea EN-only.
-# Fase 2: reemplazar por traducción completa del dataset EN->ES.
+
 SEEDS_ES_SUICIDA = [
     "quiero morir, ya no puedo más",
     "estoy pensando en quitarme la vida",
@@ -106,19 +109,19 @@ def resolve_device(arg: str) -> str:
 def load_texts_labels(dataset_id: str, max_samples: int) -> tuple[list[str], list[int]]:
     from datasets import load_dataset
 
-    print(f"[train] descargando dataset {dataset_id} ...", flush=True)
-    # ourafla trae varios CSV con schemas distintos (corpus + feature_engineered);
-    # hay que apuntar solo al corpus principal, si no falla el casteo.
+    pass
+
+
     data_files = None
     if dataset_id == "ourafla/Mental-Health_Text-Classification_Dataset":
         data_files = {"train": "mental_heath_unbanlanced.csv"}
     ds = load_dataset(dataset_id, data_files=data_files)
-    # toma el primer split con datos (train/test)
+
     split = "train" if "train" in ds else list(ds.keys())[0]
     df = ds[split].to_pandas()
-    print(f"[train] columnas: {list(df.columns)} | filas: {len(df)}", flush=True)
+    pass
 
-    # Normaliza nombres de columna (soporta ourafla y vibhorag)
+
     cols_lower = {c.lower(): c for c in df.columns}
     text_col = cols_lower.get("text") or cols_lower.get("texto") or cols_lower.get("sentence")
     label_col = cols_lower.get("status") or cols_lower.get("label") or cols_lower.get("class") or cols_lower.get("clase")
@@ -127,35 +130,35 @@ def load_texts_labels(dataset_id: str, max_samples: int) -> tuple[list[str], lis
 
     texts = df[text_col].astype(str).tolist()
     raw = df[label_col].tolist()
-    # Binariza: suicida=1. ourafla usa 'Suicidal'; vibhorag usa 0/1 o 'suicide'
+
     labels = []
     for v in raw:
         s = str(v).strip().lower()
         labels.append(1 if s in ("1", "suicidal", "suicide", "label_1") else 0)
 
     if max_samples and len(texts) > max_samples:
-        # submuestreo estratificado (xs = porción train de tamaño max_samples)
+
         xs, _, ys, _ = train_test_split(
             texts, labels, train_size=max_samples,
             stratify=labels, random_state=42,
         )
         texts, labels = xs, ys
-        print(f"[train] submuestreo a {len(texts)}", flush=True)
+        pass
 
     pos = sum(labels)
-    print(f"[train] positivos(suicida)={pos} negativos={len(labels)-pos}", flush=True)
+    pass
     return texts, labels
 
 
 def embed_texts(texts: list[str], model_name: str, batch_size: int, device: str, fp16: bool) -> np.ndarray:
     from sentence_transformers import SentenceTransformer
 
-    print(f"[train] cargando {model_name} en {device} fp16={fp16 and device=='cuda'}", flush=True)
+    pass
     kwargs: dict = {}
     if fp16 and device == "cuda":
         kwargs["torch_dtype"] = torch.float16
     model = SentenceTransformer(model_name, device=device, model_kwargs=kwargs or None)
-    # Prefijo E5 obligatorio para documentos
+
     prefixed = [t if t.startswith("passage: ") else f"passage: {t}" for t in texts]
     emb = model.encode(
         prefixed, batch_size=batch_size, show_progress_bar=True,
@@ -176,9 +179,9 @@ def main() -> None:
     if not args.no_seeds_es:
         texts = texts + SEEDS_ES_SUICIDA + SEEDS_ES_NO_SUICIDA
         labels = labels + [1] * len(SEEDS_ES_SUICIDA) + [0] * len(SEEDS_ES_NO_SUICIDA)
-        print(f"[train] +{len(SEEDS_ES_SUICIDA)+len(SEEDS_ES_NO_SUICIDA)} semillas ES", flush=True)
+        pass
 
-    # Mezcla bilingüe en UN SOLO train (no secuencial: evita olvido catastrófico)
+
     for extra in args.extra_csv or []:
         import pandas as pd
         dfx = pd.read_parquet(extra) if str(extra).endswith(".parquet") else pd.read_csv(extra)
@@ -191,10 +194,10 @@ def main() -> None:
               for v in dfx[lc].tolist()]
         texts += xt
         labels += yl
-        print(f"[train] +{len(xt)} extra ES desde {extra} (pos={sum(yl)})", flush=True)
+        pass
 
     X = embed_texts(texts, args.embedding_model, args.batch_size, device, fp16)
-    print(f"[train] embeddings: {X.shape}", flush=True)
+    pass
     y = np.asarray(labels, dtype=int)
 
     Xtr, Xte, ytr, yte = train_test_split(
@@ -202,7 +205,7 @@ def main() -> None:
 
     base = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
     clf = CalibratedClassifierCV(base, method="sigmoid", cv=3)
-    print("[train] entrenando LogReg calibrada ...", flush=True)
+    pass
     clf.fit(Xtr, ytr)
 
     proba = clf.predict_proba(Xte)[:, 1]
@@ -221,7 +224,7 @@ def main() -> None:
         "date": datetime.now(timezone.utc).isoformat(),
     }
 
-    # F1 en español con el holdout reservado (no visto en train)
+
     if args.es_test:
         import pandas as pd
         dfe = (pd.read_parquet(args.es_test) if str(args.es_test).endswith(".parquet")
@@ -242,8 +245,8 @@ def main() -> None:
             "precision": float(precision_score(yte_es, pr, zero_division=0)),
             "recall": float(recall_score(yte_es, pr, zero_division=0)),
         }
-        print("[train] métricas ES:", json.dumps(metrics["es_test"], indent=2), flush=True)
-    print("[train] métricas:", json.dumps(metrics, indent=2), flush=True)
+        pass
+    pass
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -256,7 +259,7 @@ def main() -> None:
     )
     (out / "thresholds.json").write_text(json.dumps(THRESHOLDS, indent=2), encoding="utf-8")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    print(f"[train] OK -> {out}/risk_model.pkl", flush=True)
+    pass
 
 
 if __name__ == "__main__":

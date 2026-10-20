@@ -6,7 +6,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 def get_dataset_row_analysis(dataset: pd.DataFrame) -> pd.DataFrame:
     dataset['characters'] = dataset['texto'].astype(str).apply(len)
     dataset['words'] = dataset['texto'].apply(lambda x: len(x.split(' ')))
-    dataset['sentences'] = dataset['texto'].str.count('[\w][\.!\?]').clip(lower=1)
+    dataset['sentences'] = dataset['texto'].str.count(r'[\w][.!?]').clip(lower=1)
     dataset['Avg-charperword'] = (dataset['characters']/dataset['words'])
     dataset['Avg-charpersentence'] = (dataset['characters']/dataset['sentences'])
 

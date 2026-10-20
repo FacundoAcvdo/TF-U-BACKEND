@@ -2,12 +2,10 @@ from supabase import create_client
 from fastapi import HTTPException
 import os
 
-##########
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
-##########
 
 def get_supabase_client(user_jwt: str):
     client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)

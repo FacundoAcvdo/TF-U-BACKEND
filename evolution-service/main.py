@@ -1,18 +1,29 @@
+import time
+import uuid
+import asyncio
 import os
 import re
 from collections import Counter
+from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 import chromadb
 import pandas as pd
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
 import nltk
 from nltk.corpus import stopwords
 
-from emotions import EMOTIONS, predecir_emociones_textos, promediar_emociones
+from emotions import EMOTIONS, get_emotion_pipeline, predecir_emociones_textos, promediar_emociones
+import logging
+from logging_utils import setup_service_logger
+import jobs
+from model_cache import ModelBusyError, warmup_enabled
+logger = setup_service_logger("evolution-service")
+
 
 try:
     nltk.data.find('corpora/stopwords')
@@ -44,8 +55,6 @@ REMITENTES_SISTEMA = {
 
 USUARIO_GENERICO = "Usuario 1"
 
-# Chroma guarda el autor como "autor" (dataset-service/models.py),
-# pero el front / datasets viejos usan "remitente". Se aceptan ambos.
 def obtener_autor(meta: dict) -> str:
     return ((meta or {}).get("remitente") or (meta or {}).get("autor") or "").strip()
 
@@ -59,13 +68,24 @@ def filtro_por_remitente(x_user_id: str, dataset_id: str, remitente: str) -> dic
         ]
     }
 
-TABLA_CACHE = "evolucion_resultados"
+TABLA_CACHE = "evolution_results"
 
 TABLA_CACHE_EMOCIONES = "emotions_evolution_results"
 
 OBJETIVO_BLOQUES = 10
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not warmup_enabled():
+        logger.warning("[evolution-service] warmup omitido por WARMUP=false (carga lazy al primer uso).")
+    else:
+        try:
+            await asyncio.to_thread(get_emotion_pipeline)
+        except Exception as e:
+            logger.warning(f"[evolution-service] warmup pipeline emociones fallo (seguira lazy en primera request): {e}")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 origins = ["http://localhost:8080", "http://localhost:3000", "http://127.0.0.1:3000",]
 
@@ -256,7 +276,7 @@ def buscar_cache(supabase, x_user_id: str, dataset_id: str, remitente: str,
             if int(fila.get("cantidad_mensajes", -1)) == cantidad:
                 return fila.get("payload")
     except Exception as e:
-        print(f"Aviso: no se pudo leer el caché de evolución: {str(e)}")
+        logger.warning(f"Aviso: no se pudo leer el caché de evolución: {str(e)}")
     return None
 
 
@@ -276,7 +296,7 @@ def guardar_cache(supabase, x_user_id: str, dataset_id: str, remitente: str,
             on_conflict="user_id,dataset_id,remitente,modo,top_k",
         ).execute()
     except Exception as e:
-        print(f"Aviso: no se pudo guardar el caché de evolución: {str(e)}")
+        logger.warning(f"Aviso: no se pudo guardar el caché de evolución: {str(e)}")
 
 
 class UsuariosRequest(BaseModel):
@@ -293,6 +313,31 @@ class EvolucionEmocionesRequest(BaseModel):
     dataset: str
     remitente: str
     modo: Literal["auto", "fecha", "bloques"] = "auto"
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
 
 
 @app.post("/users")
@@ -373,18 +418,85 @@ async def obtener_usuarios(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error al obtener usuarios del chat: {str(e)}")
+        logger.exception(f"Error al obtener usuarios del chat: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail="Error interno del servidor.",
         )
 
 
-@app.post("/word-evolution")
-async def evolucion_palabras(
+@app.post("/word-evolution", status_code=202)
+async def start_word_evolution(
     data: EvolucionPalabrasRequest,
+    background_tasks: BackgroundTasks,
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Encola la evolucion de palabras. Devuelve 202 {job_id}; el resultado
+    se consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="evolution", job_type="word-evolution",
+            user_id=x_user_id, dataset_name=data.dataset,
+            params=data.model_dump(mode="json"),
+        )
+    except Exception as e:
+        logger.exception(f"[evolution] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_word_evolution_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+def _run_word_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_word_evolution_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_word_evolution_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_word_evolution(EvolucionPalabrasRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[evolution] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[evolution] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
+
+
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}
+
+
+async def _compute_word_evolution(
+    data: EvolucionPalabrasRequest,
+    x_user_id: str,
+    x_user_token: str,
 ):
     try:
         supabase = get_supabase_client(x_user_token)
@@ -472,11 +584,14 @@ async def evolucion_palabras(
 
     except HTTPException:
         raise
+    except ModelBusyError as e:
+        logger.warning(f"[evolution-service] sin VRAM para evolucion de palabras: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     except Exception as e:
-        print(f"Error al calcular evolución de palabras: {str(e)}")
+        logger.exception(f"Error al calcular evolución de palabras: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail="Error interno del servidor.",
         )
 
 
@@ -577,11 +692,53 @@ def evolucion_por_bloques(documentos: list[str], metadatas: list,
         "bloques": bloques_respuesta,
     }
 
-@app.post("/emotions-evolution")
-async def evolucion_palabras(
+@app.post("/emotions-evolution", status_code=202)
+async def start_emotions_evolution(
     data: EvolucionEmocionesRequest,
+    background_tasks: BackgroundTasks,
     x_user_id: str = Header(..., alias="X-User-ID"),
     x_user_token: str = Header(..., alias="X-User-Token"),
+):
+    """Encola la evolucion de emociones. Devuelve 202 {job_id}; el resultado
+    se consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="evolution", job_type="emotions-evolution",
+            user_id=x_user_id, dataset_name=data.dataset,
+            params=data.model_dump(mode="json"),
+        )
+    except Exception as e:
+        logger.exception(f"[evolution] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_emotions_evolution_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+def _run_emotions_evolution_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_emotions_evolution_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_emotions_evolution_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_emotions_evolution(EvolucionEmocionesRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[evolution] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[evolution] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
+
+
+async def _compute_emotions_evolution(
+    data: EvolucionEmocionesRequest,
+    x_user_id: str,
+    x_user_token: str,
 ):
     try:
         supabase = get_supabase_client(x_user_token)
@@ -650,7 +807,7 @@ async def evolucion_palabras(
             )
 
         cache = buscar_cache_emociones(supabase, x_user_id, dataset_id, data.remitente, modo, len(documentos))
-        
+
         if cache is not None:
             cache["desde_cache"] = True
             return cache
@@ -667,11 +824,14 @@ async def evolucion_palabras(
 
     except HTTPException:
         raise
+    except ModelBusyError as e:
+        logger.warning(f"[evolution-service] sin VRAM para evolucion de emociones: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.") from e
     except Exception as e:
-        print(f"Error al calcular evolución de emociones: {str(e)}")
+        logger.exception(f"Error al calcular evolución de emociones: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail="Error interno del servidor.",
         )
 
 def buscar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente: str, modo: str, cantidad: int):
@@ -691,8 +851,8 @@ def buscar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente:
             if int(fila.get("cantidad_mensajes", -1)) == cantidad:
                 return fila.get("payload")
     except Exception as e:
-        print(f"Aviso: no se pudo leer el caché de evolución de emociones: {str(e)}")
-    return None  
+        logger.warning(f"Aviso: no se pudo leer el caché de evolución de emociones: {str(e)}")
+    return None
 
 def evolucion_emociones_por_fecha(documentos: list[str], fechas_raw: list, data: EvolucionEmocionesRequest) -> dict:
     df = pd.DataFrame(
@@ -799,4 +959,4 @@ def guardar_cache_emociones(supabase, x_user_id: str, dataset_id: str, remitente
             on_conflict="dataset_id,user_id,remitente,modo",
         ).execute()
     except Exception as e:
-        print(f"Aviso: no se pudo guardar el caché de evolución de emociones: {str(e)}")
+        logger.warning(f"Aviso: no se pudo guardar el caché de evolución de emociones: {str(e)}")

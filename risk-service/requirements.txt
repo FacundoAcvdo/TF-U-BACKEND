@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pydantic
 numpy
-scikit-learn
+scikit-learn==1.7.2
 joblib
 supabase
 chromadb>=0.5.5

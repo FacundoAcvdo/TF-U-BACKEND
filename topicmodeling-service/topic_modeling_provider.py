@@ -11,6 +11,9 @@ from nltk.corpus import stopwords
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import CountVectorizer
 from umap import UMAP
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("topicmodeling-service")
 
 
 class TopicModelingProvider:
@@ -37,9 +40,6 @@ class TopicModelingProvider:
 
         self._download_stopwords()
 
-    # -------------------------------------------------------------------------
-    # Inicialización
-    # -------------------------------------------------------------------------
 
     @staticmethod
     def _download_stopwords() -> None:
@@ -71,9 +71,6 @@ class TopicModelingProvider:
 
         return list(raw_stopwords - critical_words)
 
-    # -------------------------------------------------------------------------
-    # API pública
-    # -------------------------------------------------------------------------
 
     async def extract_topics(
         self,
@@ -92,9 +89,6 @@ class TopicModelingProvider:
             max_topics,
         )
 
-    # -------------------------------------------------------------------------
-    # Pipeline principal
-    # -------------------------------------------------------------------------
 
     def _extract_topics_sync(
         self,
@@ -122,42 +116,27 @@ class TopicModelingProvider:
                 "Los embeddings deben ser un array 2D."
             )
 
-        # ------------------------------------------------------------------
-        # 1. Reducción dimensional
-        # ------------------------------------------------------------------
 
         dim_reduction_model = self._build_dimension_reduction_model(
             n_docs=n_docs,
         )
 
-        # ------------------------------------------------------------------
-        # 2. HDBSCAN
-        # ------------------------------------------------------------------
 
         hdbscan_model = self._build_hdbscan_model(
             n_docs=n_docs,
         )
 
-        # ------------------------------------------------------------------
-        # 3. Vectorizer
-        # ------------------------------------------------------------------
 
         vectorizer_model = self._build_vectorizer(
             n_docs=n_docs,
         )
 
-        # ------------------------------------------------------------------
-        # 4. c-TF-IDF
-        # ------------------------------------------------------------------
 
         ctfidf_model = ClassTfidfTransformer(
             reduce_frequent_words=True,
             bm25_weighting=True,
         )
 
-        # ------------------------------------------------------------------
-        # 5. BERTopic
-        # ------------------------------------------------------------------
 
         model = BERTopic(
             umap_model=dim_reduction_model,
@@ -177,9 +156,6 @@ class TopicModelingProvider:
             dtype=np.int32,
         )
 
-        # ------------------------------------------------------------------
-        # 6. Reducir outliers
-        # ------------------------------------------------------------------
 
         topics = self._reduce_outliers(
             model=model,
@@ -189,9 +165,6 @@ class TopicModelingProvider:
             ctfidf_model=ctfidf_model,
         )
 
-        # ------------------------------------------------------------------
-        # 7. Reducir cantidad de tópicos SOLO si supera max_topics
-        # ------------------------------------------------------------------
 
         topics, reduction, model = self._reduce_topics_if_needed(
             model=model,
@@ -200,17 +173,11 @@ class TopicModelingProvider:
             max_topics=max_topics,
         )
 
-        # ------------------------------------------------------------------
-        # 8. Construcción eficiente de índices por tópico
-        # ------------------------------------------------------------------
 
         topic_indexes = self._build_topic_indexes(
             topics=topics,
         )
 
-        # ------------------------------------------------------------------
-        # 9. Construcción de resultados
-        # ------------------------------------------------------------------
 
         topic_results = self._build_topic_results(
             model=model,
@@ -239,9 +206,6 @@ class TopicModelingProvider:
             "topics": topic_results,
         }
 
-    # -------------------------------------------------------------------------
-    # Validación
-    # -------------------------------------------------------------------------
 
     @staticmethod
     def _validate_input(
@@ -276,9 +240,6 @@ class TopicModelingProvider:
                 "La cantidad de documentos e IDs no coincide."
             )
 
-    # -------------------------------------------------------------------------
-    # UMAP / PCA
-    # -------------------------------------------------------------------------
 
     def _build_dimension_reduction_model(
         self,
@@ -302,9 +263,6 @@ class TopicModelingProvider:
             low_memory=True,
         )
 
-    # -------------------------------------------------------------------------
-    # HDBSCAN
-    # -------------------------------------------------------------------------
 
     def _build_hdbscan_model(
         self,
@@ -325,9 +283,6 @@ class TopicModelingProvider:
             core_dist_n_jobs=-1,
         )
 
-    # -------------------------------------------------------------------------
-    # Vectorizer
-    # -------------------------------------------------------------------------
 
     def _build_vectorizer(
         self,
@@ -343,9 +298,6 @@ class TopicModelingProvider:
             min_df=min_df,
         )
 
-    # -------------------------------------------------------------------------
-    # Outliers
-    # -------------------------------------------------------------------------
 
     def _reduce_outliers(
         self,
@@ -384,11 +336,7 @@ class TopicModelingProvider:
         except Exception:
             return topics
 
-    # -------------------------------------------------------------------------
-    # Reducción de tópicos
-    # -------------------------------------------------------------------------
 
-    # Escalera de reducción: intentos como máximo, paso entre intentos.
     REDUCTION_MAX_ATTEMPTS = 4
     REDUCTION_STEP = 5
 
@@ -432,12 +380,12 @@ class TopicModelingProvider:
                 model,
             )
 
-        # Backup pristine ANTES del primer intento: reduce_topics muta el
-        # modelo y un fallo podría dejarlo inconsistente para reintentar.
+
         try:
             backup = copy.deepcopy(model)
         except Exception as exc:
-            print(f"[TopicModeling] Backup del modelo falló: {exc}. "
+            logger.exception(f"[TopicModeling] Backup del modelo falló: {exc}. "
+
                   f"Se intenta reducción directa única a {max_topics}.")
             backup = None
 
@@ -477,7 +425,8 @@ class TopicModelingProvider:
                 return reduced_topics, reduction, target
 
             except Exception as exc:
-                print(f"[TopicModeling] Reducción a {nr_topics} falló "
+                logger.exception(f"[TopicModeling] Reducción a {nr_topics} falló "
+
                       f"(intento {attempt + 1}/{len(candidates)}): {exc}")
                 if target is not model:
                     del target
@@ -485,17 +434,13 @@ class TopicModelingProvider:
                 continue
 
         gc.collect()
-        print(f"[TopicModeling] No se pudo reducir de "
-              f"{current_topic_count} tópicos. Se devuelven los originales.")
+        pass
         return (
             topics,
             {"requested": max_topics, "achieved": current_topic_count},
             model,
         )
 
-    # -------------------------------------------------------------------------
-    # Índices por tópico
-    # -------------------------------------------------------------------------
 
     @staticmethod
     def _build_topic_indexes(
@@ -513,9 +458,6 @@ class TopicModelingProvider:
 
         return dict(topic_indexes)
 
-    # -------------------------------------------------------------------------
-    # Resultados
-    # -------------------------------------------------------------------------
 
     def _build_topic_results(
         self,
@@ -572,9 +514,6 @@ class TopicModelingProvider:
 
         return results
 
-    # -------------------------------------------------------------------------
-    # Documentos representativos
-    # -------------------------------------------------------------------------
 
     @staticmethod
     def _get_representative_documents(
@@ -608,7 +547,7 @@ class TopicModelingProvider:
 
             selected_index = None
 
-            # Intentamos encontrar un índice todavía no utilizado.
+
             for index in indexes:
                 if index not in used_indexes:
                     selected_index = index
@@ -627,7 +566,7 @@ class TopicModelingProvider:
             if len(result) >= limit:
                 return result
 
-        # Fallback.
+
         if len(result) < limit:
 
             for index in topic_indexes:

@@ -1,5 +1,9 @@
+import asyncio
+import time
+import uuid
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header, Request
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
 import os
@@ -10,6 +14,11 @@ from nltk.corpus import stopwords
 
 from supabase import create_client
 from chroma_reader import fetch_paginated
+import logging
+from logging_utils import setup_service_logger
+import jobs
+logger = setup_service_logger("wordcloud-service")
+
 
 class WordCloudRequest(BaseModel):
     dataset: str
@@ -94,14 +103,14 @@ def limpiar_texto(texto: str) -> str:
     return " ".join(palabras)
 
 def build_wordcloud_data(textos_limpios: list[str], max_words: int = 200):
-    # tokens globales
+
     all_tokens = []
-    # doc frequency por palabra
+
     doc_freq = Counter()
     for t in textos_limpios:
         tokens = t.split()
         all_tokens.extend(tokens)
-        # doc frequency: unique por doc
+
         doc_freq.update(set(tokens))
 
     total_words = len(all_tokens)
@@ -127,7 +136,7 @@ def build_wordcloud_data(textos_limpios: list[str], max_words: int = 200):
         df = doc_freq.get(word, 0)
         frequencies.append({
             "text": word,
-            "value": count,  # compat con wordcloud libs
+            "value": count,
             "count": count,
             "percentage": round(percentage, 2),
             "doc_frequency": df,
@@ -144,7 +153,7 @@ def build_wordcloud_data(textos_limpios: list[str], max_words: int = 200):
     }
 
 async def load_and_process_dataset(x_user_id: str, dataset_id: str):
-    # Solo pide documents, paginado.
+
     where = {
         "$and": [
             {"user_id": x_user_id},
@@ -165,11 +174,102 @@ async def load_and_process_dataset(x_user_id: str, dataset_id: str):
         raise HTTPException(status_code=400, detail="The dataset does not contain usable text.")
     return textos, len(textos)
 
-@app.post("/visualizeWordCloud")
-async def createWordCloud(
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
+@app.post("/visualizeWordCloud", status_code=202)
+async def start_wordcloud(
     data: WordCloudRequest,
+    background_tasks: BackgroundTasks,
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
+):
+    """Encola la nube de palabras. Devuelve 202 {job_id}; el resultado se
+    consulta con GET /jobs/{job_id} (el JSON es el mismo de antes)."""
+    supabase = get_supabase_client(x_user_token)
+    try:
+        job = jobs.create_job(
+            supabase, service="wordcloud", job_type="wordcloud",
+            user_id=x_user_id, dataset_name=data.dataset, params={},
+        )
+    except Exception as e:
+        logger.exception(f"[wordcloud] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
+    background_tasks.add_task(_run_wordcloud_job, job["job_id"], data.model_dump(mode="json"), x_user_id, x_user_token)
+    return {"job_id": job["job_id"], "status": "queued", "dataset": data.dataset}
+
+
+def _run_wordcloud_job(job_id: str, payload: dict, user_id: str, user_token: str):
+    asyncio.run(_run_wordcloud_job_async(job_id, payload, user_id, user_token))
+
+
+async def _run_wordcloud_job_async(job_id: str, payload: dict, user_id: str, user_token: str):
+    supabase = get_supabase_client(user_token)
+    jobs.mark_running(supabase, job_id)
+    try:
+        result = await _compute_wordcloud(WordCloudRequest(**payload), user_id, user_token)
+    except HTTPException as e:
+        logger.warning(f"[wordcloud] job {job_id} fallo | code={e.status_code} detail={e.detail}")
+        jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
+        return
+    except Exception as e:
+        logger.exception(f"[wordcloud] job {job_id} fallo no controlado | causa={type(e).__name__}: {e}")
+        jobs.mark_failed(supabase, job_id, 500, "Error interno del servidor.")
+        return
+    jobs.mark_succeeded(supabase, job_id, jsonable_encoder(result))
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    supabase = get_supabase_client(x_user_token)
+    row = jobs.get_job(supabase, job_id, x_user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return row
+
+
+@app.get("/jobs")
+async def list_active_jobs(
+    dataset_name: str | None = None,
+    job_type: str | None = None,
+    x_user_id: str = Header(...),
+    x_user_token: str = Header(...),
+):
+    """Trabajos activos del usuario (para retomar al volver a la pantalla)."""
+    supabase = get_supabase_client(x_user_token)
+    return {"jobs": jobs.list_jobs(supabase, x_user_id, dataset_name, job_type, active_only=True)}
+
+
+async def _compute_wordcloud(
+    data: WordCloudRequest,
+    x_user_id: str,
+    x_user_token: str,
 ):
     try:
         supabase = get_supabase_client(x_user_token)
@@ -202,7 +302,7 @@ async def createWordCloud(
                 wc_data["max_count"], wc_data["min_count"], docs_processed
             )
         except Exception as e:
-            print(f"[wordcloud-service] warn save_wordcloud_results: {e}")
+            logger.warning(f"[wordcloud-service] warn save_wordcloud_results: {e}")
 
         return {
             "dataset_id": dataset_id,
@@ -213,8 +313,8 @@ async def createWordCloud(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error al procesar wordcloud: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al procesar wordcloud: {str(e)}")
+        logger.exception(f"Error al procesar wordcloud: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar wordcloud.")
 
 @app.post("/getWordCloudImage")
 async def getWordCloudImage(
@@ -242,5 +342,5 @@ async def getWordCloudImage(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error al obtener wordcloud: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener wordcloud: {str(e)}")
+        logger.exception(f"Error al obtener wordcloud: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al obtener wordcloud.")

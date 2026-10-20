@@ -15,6 +15,9 @@ from pathlib import Path
 import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("risk-service")
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +44,7 @@ def main() -> None:
     from datasets import load_dataset
     from transformers import pipeline
 
-    print(f"[tr] cargando {args.dataset} ...", flush=True)
+    pass
     ds = load_dataset(args.dataset)
     split = "train" if "train" in ds else list(ds.keys())[0]
     df = ds[split].to_pandas()
@@ -52,7 +55,7 @@ def main() -> None:
     df["label"] = df["label"].map(binarize)
     df["text"] = df["text"].astype(str).str.slice(0, 1000)
 
-    # Muestra estratificada total = 2*per_class + es_test_n
+
     total = 2 * args.per_class + args.es_test_n
     _, sample = train_test_split(df, train_size=min(total, len(df)),
                                  stratify=df["label"], random_state=42)
@@ -68,13 +71,13 @@ def main() -> None:
         rest[rest.label == 1].sample(n=min(args.per_class, (rest.label == 1).sum()), random_state=2),
         rest[rest.label == 0].sample(n=min(args.per_class, (rest.label == 0).sum()), random_state=2),
     ])
-    print(f"[tr] train ES={len(train_es)} test ES={len(test_es)}", flush=True)
+    pass
 
     device = 0 if torch.cuda.is_available() else -1
-    print(f"[tr] Helsinki en {'GPU' if device == 0 else 'CPU'} ...", flush=True)
+    pass
     model_kwargs: dict = {}
     if device == 0:
-        model_kwargs["torch_dtype"] = torch.float16  # 2-3x en RTX 3060, mitad VRAM
+        model_kwargs["torch_dtype"] = torch.float16
     pipe = pipeline("translation_en_to_es", model=args.model, device=device,
                     truncation=True, max_length=args.max_length,
                     model_kwargs=model_kwargs or None)
@@ -90,7 +93,7 @@ def main() -> None:
     for name, frame in (("suicide_es_train.parquet", train_es),
                         ("suicide_es_test.parquet", test_es)):
         texts = frame["text"].tolist()
-        # Batches manuales con progreso visible (el pipeline no muestra barra)
+
         bs = args.batch_size
         out_texts: list[str] = []
         rng = range(0, len(texts), bs)
@@ -103,7 +106,7 @@ def main() -> None:
         frame = frame.copy()
         frame["text"] = out_texts
         frame[["text", "label"]].to_parquet(out / name, index=False)
-        print(f"[tr] OK -> {out / name} ({len(frame)})", flush=True)
+        pass
 
 
 if __name__ == "__main__":

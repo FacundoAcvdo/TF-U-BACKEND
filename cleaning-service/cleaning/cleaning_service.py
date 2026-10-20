@@ -45,7 +45,7 @@ from .cleaners.emoji_cleaning_service import (
 
 from .cleaners.punctuation_cleaning_service import (
     PunctuationCleaningService,
-)   
+)
 
 from .cleaners.stopword_cleaning_service import (
     StopwordCleaningService,

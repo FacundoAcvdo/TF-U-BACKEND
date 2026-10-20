@@ -23,4 +23,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY . .
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8081"]
+CMD ["uvicorn", "--no-access-log", "main:app", "--host", "0.0.0.0", "--port", "8081"]

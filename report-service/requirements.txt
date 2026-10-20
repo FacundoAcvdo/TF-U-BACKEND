@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+supabase
+matplotlib
+reportlab
+svglib
+numpy
+pandas

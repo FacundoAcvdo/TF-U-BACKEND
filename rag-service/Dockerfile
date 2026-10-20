@@ -24,4 +24,4 @@ COPY --from=builder /install /usr/local
 COPY . .
 RUN mkdir -p /app/data/rag_docs
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8088"]
+CMD ["uvicorn", "--no-access-log", "main:app", "--host", "0.0.0.0", "--port", "8088"]

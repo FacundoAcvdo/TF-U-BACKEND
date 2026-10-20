@@ -1,6 +1,6 @@
 torch
 sentence-transformers
-scikit-learn
+scikit-learn==1.7.2
 datasets
 pandas
 numpy

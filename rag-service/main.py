@@ -1,11 +1,14 @@
+import time
+import uuid
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Header, HTTPException, Body, Depends, Query
+from fastapi import FastAPI, Header, HTTPException, Body, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from rag_service import rag_service
 from supabase_service import (
+
     activate_chat_record,
     delete_all_chats,
     delete_chat,
@@ -20,15 +23,19 @@ from supabase_service import (
     get_dataset_by_name,
     update_chat_title,
 )
+import logging
+from logging_utils import setup_service_logger
+from model_cache import ModelBusyError
+logger = setup_service_logger("rag-service")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         rag_service.initialize()
-        print("[main] RAG inicializado en startup")
+        pass
     except Exception as e:
-        print(f"[main] Error inicializando RAG en startup: {e}")
+        logger.exception(f"[main] Error inicializando RAG en startup: {e}")
     yield
 
 
@@ -49,7 +56,7 @@ def get_supabase(x_user_token: str = Header(..., alias="X-User-Token")):
     try:
         return get_supabase_client(x_user_token)
     except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 
 class ChatMessageRequest(BaseModel):
@@ -62,6 +69,31 @@ class CreateChatRequest(BaseModel):
 
 class ActivateChatRequest(BaseModel):
     chat_id: str
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
 
 @app.post("/chat")
 async def create_chat(
@@ -91,8 +123,8 @@ async def create_chat(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[main] Error creando chat: {e}")
-        raise HTTPException(status_code=500, detail=f"Error creando chat: {str(e)}")
+        logger.exception(f"[main] Error creando chat: {e}")
+        raise HTTPException(status_code=500, detail="Error interno creando chat.")
 
 
 @app.post("/message")
@@ -107,7 +139,7 @@ async def send_message(
 
     dataset_name = data.dataset_name.strip() if data.dataset_name and data.dataset_name.strip() else None
 
-    # 1. Resolver dataset_id y collection con única consulta a datasets (tipo -> collection)
+
     dataset_id = None
     collection = "rag_docs"
     rag_filter = None
@@ -116,7 +148,7 @@ async def send_message(
             row = get_dataset_by_name(supabase, x_user_id, dataset_name)
             if not row:
                 raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' no encontrado para el usuario")
-            
+
             dataset_id = row.get("dataset_id")
             tipo = (row.get("tipo") or "").strip().lower()
             if tipo in ("chat", "chunked_chat", "chunked_chats", "chunked"):
@@ -132,47 +164,51 @@ async def send_message(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error resolviendo dataset: {str(e)}")
+            logger.exception(f"[rag-service] fallo resolviendo dataset | user_id={x_user_id} dataset={dataset_name} causa={type(e).__name__}: {e}")
+            raise HTTPException(status_code=500, detail="Error interno resolviendo dataset.")
 
-    # 2. Inferir chat activo del grupo correspondiente (rag_docs vs dataset)
+
     chat = get_active_chat(supabase, x_user_id, dataset_id=dataset_id)
     if not chat:
         grupo = f"dataset '{dataset_name}'" if dataset_name else "rag_docs"
         raise HTTPException(status_code=404, detail=f"No hay chat activo para {grupo}. Crea uno con POST /chat primero.")
     chat_id = chat["chat_id"]
 
-    # 3. Historial previo para contexto RAG
+
     mensajes_previos = get_chat_messages(supabase, chat_id, x_user_id)
     historial_previo = [
         {"autor": m.get("autor"), "mensaje": m.get("mensaje")}
-        for m in mensajes_previos
+        for m in mensajes_previos[-4:]
     ]
 
-    # Insertar mensaje usuario
+
     msg_usuario = create_message(supabase, chat_id, x_user_id, "usuario", pregunta)
 
-    historial_para_rag = historial_previo + [{"autor": "usuario", "mensaje": pregunta}]
+    historial_para_rag = historial_previo
 
-    # 4. RAG por colección
+
     if not rag_service.is_store_ready(collection):
-        print(f"[main] RAG Not Ready para colección {collection}")
+        logger.error(f"[main] RAG Not Ready para colección {collection}")
         raise HTTPException(status_code=503, detail=f"RAG service not ready para colección '{collection}'. Please try again later.")
 
     try:
         respuesta, docs_relevantes = rag_service.query(pregunta, chat_history=historial_para_rag, collection=collection, filter=rag_filter)
     except RuntimeError as re:
-        print(f"[main] RAG RuntimeError: {re}")
-        raise HTTPException(status_code=503, detail=str(re))
+        logger.exception(f"[main] RAG RuntimeError: {re}")
+        raise HTTPException(status_code=503, detail="Servicio RAG no disponible. Intenta más tarde.")
+    except ModelBusyError as e:
+        logger.warning(f"[main] sin VRAM para RAG: {e}")
+        raise HTTPException(status_code=503, detail="Servicio ocupado, intenta más tarde.")
     except Exception as e:
-        print(f"[main] RAG query error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error RAG: {str(e)}")
+        logger.exception(f"[main] RAG query error: {e}")
+        raise HTTPException(status_code=500, detail="Error interno RAG.")
 
-    # 4. Guardar respuesta
+
     try:
         msg_asistente = create_message(supabase, chat_id, x_user_id, "asistente", respuesta)
     except Exception as e:
-        print(f"[main] WARNING no se pudo guardar respuesta asistente: {e}")
-        raise HTTPException(status_code=500, detail=f"Error guardando respuesta: {str(e)}")
+        logger.warning(f"[main] WARNING no se pudo guardar respuesta asistente: {e}")
+        raise HTTPException(status_code=500, detail="Error interno guardando respuesta.")
 
     es_primer = len(mensajes_previos) == 0
     titulo = None
@@ -181,7 +217,7 @@ async def send_message(
             titulo = rag_service.generate_title(pregunta)
             update_chat_title(supabase, chat_id, x_user_id, titulo)
         except Exception as e:
-            print(f"WARNING título: {e}")
+            logger.warning(f"WARNING título: {e}")
 
     return {
         "respuesta": msg_asistente,
@@ -211,8 +247,8 @@ async def get_chat(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[main] Error get_chat activo: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[main] Error get_chat activo: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 
 @app.get("/chats")
@@ -229,8 +265,8 @@ async def list_chats(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[main] Error list_chats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[main] Error list_chats: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 
 @app.delete("/chat")
@@ -244,8 +280,8 @@ async def delete_chat_record(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[main] Error delete_chat activo: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[main] Error delete_chat activo: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 @app.delete("/chats")
 async def delete_all(
@@ -258,8 +294,8 @@ async def delete_all(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[main] Error delete_all_chats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[main] Error delete_all_chats: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 @app.post("/activate_chat")
 async def activate_chat(
@@ -283,5 +319,5 @@ async def activate_chat(
             "chat_id": new_chat["chat_id"],
         }
     except Exception as e:
-        print(f"[main] Error activating chat: {e}")
+        logger.exception(f"[main] Error activating chat: {e}")
         raise HTTPException(status_code=500, detail="Error al activar el chat")

@@ -19,8 +19,8 @@ def _normalizar_fechas_a_iso(
     Lanza ValueError si algún valor no vacío es inválido (fail-fast,
     igual que el parseo por fila anterior).
     """
-    # dayfirst según formato: DMY (o sin formato) -> True; MDY/YMD -> False.
-    # Para YMD con '/', pandas ya interpreta año primero; dayfirst no afecta.
+
+
     dayfirst = formato_fecha in (None, "DMY")
 
     original = serie.astype(object)
@@ -135,16 +135,14 @@ class DataFrameParser(
             if column not in columnas_mapeadas
         ]
 
-        # Fechas normalizadas una sola vez por columna (vectorizado),
-        # no una conversión por fila.
+
         fechas_iso: list[str | None] | None = None
         if columna_fecha:
             fechas_iso = _normalizar_fechas_a_iso(
                 df[columna_fecha], formato_fecha
             )
 
-        # Registros como dicts (sin el overhead de Series por fila
-        # que impone df.iterrows()).
+
         registros = df.to_dict(orient="records")
 
         documents: list[Document] = []
@@ -267,54 +265,57 @@ class CSVParser(
             formato_fecha=formato_fecha,
         )
 
-    def _leer_csv(
-        self,
-        content: bytes,
-    ) -> pd.DataFrame:
-        ultimo_error: Exception | None = None
+    def _detectar_separador(self, muestra: str) -> str:
+        candidatos = [";", ",", "\t", "|"]
+        lineas = [l for l in muestra.splitlines() if l.strip()][:10]
+        if not lineas:
+            return ","
+        mejor, mejor_score = ",", -1
+        for sep in candidatos:
+            conteos = [l.count(sep) for l in lineas]
+            if sum(conteos) == 0:
+                continue
+            score = sum(conteos) - (max(conteos) - min(conteos)) * 10
+            if score > mejor_score:
+                mejor, mejor_score = sep, score
+        return mejor
 
-        for encoding in self.ENCODINGS_A_PROBAR:
+    def _leer_csv(self, content: bytes) -> pd.DataFrame:
+        muestra = content[:8192].decode("utf-8", errors="replace")
+        sep = self._detectar_separador(muestra)
+
+        try:
+            df_pl = pl.read_csv(
+                io.BytesIO(content),
+                encoding="utf8-lossy",
+                separator=sep,
+                infer_schema_length=0,
+                ignore_errors=True,
+                truncate_ragged_lines=True,
+                null_values=["", "NULL", "#¿NOMBRE?"],
+            )
+            if len(df_pl.columns) > 1:
+                return df_pl.to_pandas()
+        except Exception:
+            pass
+
+        for enc in ("cp1252", "latin-1"):
             try:
-                if encoding.lower() in ("utf-8", "utf8"):
-                    df_pl = pl.read_csv(
-                        io.BytesIO(content),
-                        infer_schema_length=0,
-                        ignore_errors=True,
-                        truncate_ragged_lines=True,
-                    )
-                else:
-                    texto = content.decode(encoding)
-                    df_pl = pl.read_csv(
-                        io.StringIO(texto),
-                        infer_schema_length=0,
-                        ignore_errors=True,
-                        truncate_ragged_lines=True,
-                    )
-
-                nuevas_columnas = {
-                    col: f"unnamed_{i}"
-                    for i, col in enumerate(df_pl.columns)
-                    if not col or not col.strip()
-                }
-                if nuevas_columnas:
-                    df_pl = df_pl.rename(nuevas_columnas)
-
-                return (
-                    df_pl.to_pandas()
-                    if hasattr(df_pl, "to_pandas")
-                    else pd.DataFrame(df_pl.to_dicts())
+                texto = content.decode(enc)
+                sep2 = self._detectar_separador(texto[:8192])
+                df_pl = pl.read_csv(
+                    io.StringIO(texto),
+                    separator=sep2,
+                    infer_schema_length=0,
+                    ignore_errors=True,
+                    truncate_ragged_lines=True,
                 )
-
-            except UnicodeDecodeError as exc:
-                ultimo_error = exc
-                continue
-            except Exception as exc:
-                ultimo_error = exc
+                if len(df_pl.columns) > 1:
+                    return df_pl.to_pandas()
+            except Exception:
                 continue
 
-        raise ValueError(
-            f"No se pudo leer el CSV: no se reconoce la codificación (último error: {ultimo_error})"
-        )
+        raise ValueError("No se pudo leer el CSV con ; , \\t |")
 
 
 class XLSXParser(

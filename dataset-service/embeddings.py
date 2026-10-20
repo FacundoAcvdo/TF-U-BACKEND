@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
 import os
+import threading
 
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
+
+import model_cache
+from model_cache import ModelSlot
 
 
 DEFAULT_MODEL = os.environ.get(
@@ -15,6 +19,7 @@ DEFAULT_DEVICE = os.environ.get("EMBEDDING_DEVICE", "auto")
 DEFAULT_FP16 = os.environ.get("EMBEDDING_FP16", "true").lower() in (
     "true", "1", "yes", "on",
 )
+EMBEDDING_VRAM_MB = int(os.environ.get("EMBEDDING_VRAM_MB", "1500"))
 
 
 class EmbeddingProvider(ABC):
@@ -84,16 +89,42 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
 
         self.model_name = model_name
         self.batch_size = batch_size
+        self._fp16 = fp16
+        self._slot = None
+        self._slot_lock = threading.Lock()
 
-        model_kwargs: dict = {}
-        if fp16 and self.device == "cuda":
-            model_kwargs["torch_dtype"] = torch.float16
+    def _get_slot(self):
+        slot = self._slot
+        if slot is None:
+            with self._slot_lock:
+                slot = self._slot
+                if slot is None:
+                    provider = self
 
-        self.model = SentenceTransformer(
-            model_name,
-            device=self.device,
-            model_kwargs=model_kwargs or None,
-        )
+                    def _load():
+                        model_kwargs: dict = {}
+                        if provider._fp16 and provider.device == "cuda":
+                            model_kwargs["torch_dtype"] = torch.float16
+                        return SentenceTransformer(
+                            provider.model_name,
+                            device=provider.device,
+                            model_kwargs=model_kwargs or None,
+                        )
+
+                    def _drop(model):
+                        try:
+                            del model
+                        except Exception:
+                            pass
+
+                    slot = ModelSlot(
+                        name=f"embeddings-{self.model_name}",
+                        vram_mb=EMBEDDING_VRAM_MB,
+                        load_fn=_load,
+                        unload_fn=_drop,
+                    )
+                    self._slot = slot
+        return slot
 
     def _with_prefix(self, texts: list[str], prefix: str) -> list[str]:
         return [
@@ -108,13 +139,16 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
         if not texts:
             return []
 
-        embeddings = self.model.encode(
-            sentences=self._with_prefix(texts, self.passage_prefix),
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
+        slot = self._get_slot()
+        slot.maybe_evict()
+        with slot.use() as model:
+            embeddings = model.encode(
+                sentences=self._with_prefix(texts, self.passage_prefix),
+                batch_size=self.batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
 
         return np.asarray(embeddings, dtype=np.float32).tolist()
 
@@ -122,12 +156,15 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
         self,
         text: str,
     ) -> list[float]:
-        embeddings = self.model.encode(
-            sentences=[f"{self.query_prefix}{text}"],
-            batch_size=1,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
+        slot = self._get_slot()
+        slot.maybe_evict()
+        with slot.use() as model:
+            embeddings = model.encode(
+                sentences=[f"{self.query_prefix}{text}"],
+                batch_size=1,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
 
         return np.asarray(embeddings, dtype=np.float32)[0].tolist()

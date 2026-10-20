@@ -1,8 +1,15 @@
-from fastapi import FastAPI, Header, HTTPException, Response
+import time
+import uuid
+from fastapi import FastAPI, Header, HTTPException, Response, Request
 from pydantic import BaseModel, EmailStr
 from supabase import create_client
 from typing import Literal, Optional
+import logging
 import os
+
+from logging_utils import setup_service_logger
+
+logger = setup_service_logger("auth-service")
 
 app = FastAPI()
 
@@ -18,6 +25,31 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    inicio = time.perf_counter()
+    try:
+        response = await call_next(request)
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        user_id = request.headers.get("x-user-id", "-")
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"status={response.status_code} latencia_ms={latencia_ms} "
+            f"req={request_id} user_id={user_id}"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            f"fallo no controlado {request.method} {request.url.path} "
+            f"req={request_id} latencia_ms={latencia_ms} causa={type(e).__name__}: {e}"
+        )
+        raise
+
+
 @app.post("/auth/login")
 async def login(data: LoginRequest, response: Response):
 
@@ -26,7 +58,8 @@ async def login(data: LoginRequest, response: Response):
             "email": data.email,
             "password": data.password
         })
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[auth-service] login fallido | method=POST email={data.email} causa={type(e).__name__}")
         raise HTTPException(401, "Email o contraseña incorrectos")
 
     response.set_cookie(
@@ -43,7 +76,9 @@ async def login(data: LoginRequest, response: Response):
         "user": {
             "id": result.user.id,
             "email": result.user.email,
-        }
+        },
+        "access_token": result.session.access_token,
+        "expires_in": result.session.expires_in,
     }
 
 def _admin_client():
@@ -58,7 +93,8 @@ def _exigir_admin(x_user_id: Optional[str]):
         resp = _admin_client().auth.admin.get_user_by_id(x_user_id)
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[auth-service] verificacion admin fallida | user_id={x_user_id} causa={type(e).__name__}")
         raise HTTPException(403, "Sin permiso")
     meta = {}
     if resp.user is not None and isinstance(resp.user.app_metadata, dict):
@@ -96,7 +132,8 @@ async def me(x_user_id: Optional[str] = Header(default=None, alias="X-User-ID"))
         resp = _admin_client().auth.admin.get_user_by_id(x_user_id)
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[auth-service] fallo en GET /auth/me | method=GET user_id={x_user_id} causa={type(e).__name__}")
         raise HTTPException(401, "No autenticado")
     if resp.user is None:
         raise HTTPException(401, "No autenticado")
@@ -112,7 +149,8 @@ async def admin_listar_usuarios(
     try:
         usuarios = _admin_client().auth.admin.list_users(page=page, per_page=per_page)
     except Exception as e:
-        raise HTTPException(500, f"No se pudo listar usuarios: {str(e)}")
+        logger.exception(f"[auth-service] fallo en GET /auth/admin/users | method=GET user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(500, "No se pudo listar usuarios.")
     return {"users": [_resumen_usuario(u) for u in usuarios]}
 
 @app.post("/auth/admin/users")
@@ -129,7 +167,8 @@ async def admin_crear_usuario(
             "app_metadata": {"role": data.role},
         })
     except Exception as e:
-        raise HTTPException(400, f"No se pudo crear el usuario: {str(e)}")
+        logger.exception(f"[auth-service] fallo en POST /auth/admin/users | method=POST user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(400, "No se pudo crear el usuario.")
     return {"message": "Usuario creado", "user": _resumen_usuario(resp.user)}
 
 @app.patch("/auth/admin/users/{user_id}/role")
@@ -146,7 +185,8 @@ async def admin_cambiar_rol(
             user_id, {"app_metadata": {"role": data.role}}
         )
     except Exception as e:
-        raise HTTPException(400, f"No se pudo cambiar el rol: {str(e)}")
+        logger.exception(f"[auth-service] fallo en PATCH rol | method=PATCH user_id={user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(400, "No se pudo cambiar el rol.")
     return {"message": "Rol actualizado", "user": _resumen_usuario(resp.user)}
 
 @app.patch("/auth/admin/users/{user_id}/password")
@@ -163,7 +203,8 @@ async def admin_cambiar_password(
             user_id, {"password": data.password}
         )
     except Exception as e:
-        raise HTTPException(400, f"No se pudo cambiar la contraseña: {str(e)}")
+        logger.exception(f"[auth-service] fallo en PATCH password | method=PATCH user_id={user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(400, "No se pudo cambiar la contraseña.")
     return {"message": "Contraseña actualizada. El usuario deberá iniciar sesión de nuevo."}
 
 @app.delete("/auth/admin/users/{user_id}")
@@ -187,7 +228,8 @@ async def admin_eliminar_usuario(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(400, f"No se pudo eliminar el usuario: {str(e)}")
+        logger.exception(f"[auth-service] fallo en DELETE usuario | method=DELETE user_id={user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(400, "No se pudo eliminar el usuario.")
     return {"message": "Usuario eliminado"}
 
 @app.post("/auth/logout")

@@ -33,7 +33,7 @@ def get_cluster_and_outlier_dataframes(embeddings):
 
             try:
                 clusters = hdb.fit_predict(reduced_5d)
-        
+
                 if hasattr(clusters, 'get'):
                     clusters = clusters.get()
                 clusters = clusters.astype(int) if hasattr(clusters, 'astype') else clusters

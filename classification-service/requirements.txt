@@ -1,9 +1,8 @@
 fastapi
 uvicorn[standard]
 pydantic
-scikit-learn
+scikit-learn==1.7.2
 numpy
-pandas
 chromadb
 supabase
 transformers>=4.44.0,<4.49.0

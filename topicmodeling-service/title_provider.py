@@ -2,6 +2,9 @@ import asyncio
 import json
 import re
 from typing import Any
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("topicmodeling-service")
 
 
 PROMPT_TEMPLATE = """Genera un título corto y representativo para cada tópico de un modelado de tópicos (BERTopic).
@@ -61,9 +64,6 @@ class TitleProvider:
         self.max_chars_per_doc = max(100, max_chars_per_doc)
         self.timeout = timeout
 
-    # ------------------------------------------------------------------
-    # API pública
-    # ------------------------------------------------------------------
 
     @property
     def is_available(self) -> bool:
@@ -85,9 +85,9 @@ class TitleProvider:
                 batch_titles = await self._generate_batch(batch)
                 titles.update(batch_titles)
             except Exception as exc:
-                print(f"[TitleProvider] Batch {i // self.batch_size} falló: {exc}")
+                logger.exception(f"[TitleProvider] Batch {i // self.batch_size} falló: {exc}")
 
-            # Pausa breve para no golpear el RPM del tier gratis.
+
             if i + self.batch_size < len(topics):
                 await asyncio.sleep(4)
 
@@ -97,9 +97,6 @@ class TitleProvider:
     def fallback_title(keywords: list[str]) -> str:
         return " · ".join(keywords[:3]) if keywords else "Tópico sin título"
 
-    # ------------------------------------------------------------------
-    # Batch
-    # ------------------------------------------------------------------
 
     async def _generate_batch(
         self,
@@ -122,16 +119,15 @@ class TitleProvider:
             except Exception as exc:
                 last_error = exc
                 msg = str(exc)
-                # Transitorios (rate limit, sobrecarga): esperar y reintentar.
+
                 if _is_transient_error(msg):
                     wait = 10 * (attempt + 1)
-                    print(
-                        "[TitleProvider] Gemini transitorio "
-                        f"(intento {attempt + 1}/3), esperando {wait}s..."
-                    )
+                    logger.exception("[TitleProvider] Gemini transitorio "
+
+                        f"(intento {attempt + 1}/3), esperando {wait}s...")
                     await asyncio.sleep(wait)
                 else:
-                    print(f"[TitleProvider] Error batch: {exc}")
+                    logger.exception(f"[TitleProvider] Error batch: {exc}")
                     break
 
         raise last_error or RuntimeError("Fallo desconocido en Gemini.")
@@ -151,9 +147,6 @@ class TitleProvider:
         )
         return (response.text or "").strip()
 
-    # ------------------------------------------------------------------
-    # Prompt / parsing
-    # ------------------------------------------------------------------
 
     def _build_topics_block(self, batch: list[dict[str, Any]]) -> str:
         parts: list[str] = []
@@ -194,7 +187,7 @@ class TitleProvider:
             except (TypeError, ValueError):
                 continue
 
-        # Tolera fences ```json ... ``` y texto alrededor del JSON.
+
         cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
@@ -204,22 +197,22 @@ class TitleProvider:
         except json.JSONDecodeError:
             match = re.search(r"\[.*\]", cleaned, re.DOTALL)
             if match is None:
-                print(f"[TitleProvider] Respuesta no-JSON de Gemini: {text[:500]!r}")
+                logger.exception(f"[TitleProvider] Respuesta no-JSON de Gemini: {text[:500]!r}")
                 return {}
             try:
                 data = json.loads(match.group(0))
             except json.JSONDecodeError as exc:
-                print(f"[TitleProvider] JSON inválido: {exc}. Respuesta: {text[:500]!r}")
+                logger.exception(f"[TitleProvider] JSON inválido: {exc}. Respuesta: {text[:500]!r}")
                 return {}
 
-        # Tolera envoltorios {"titles": [...]} o {"topics": [...]}.
+
         if isinstance(data, dict):
             for key in ("titles", "topics", "result", "data"):
                 if isinstance(data.get(key), list):
                     data = data[key]
                     break
             else:
-                print(f"[TitleProvider] Respuesta dict sin lista: {text[:500]!r}")
+                pass
                 return {}
 
         titles: dict[int, str] = {}
@@ -239,6 +232,6 @@ class TitleProvider:
                     titles[tid] = title[:80]
 
         if not titles:
-            print(f"[TitleProvider] Sin títulos parseables. Respuesta: {text[:500]!r}")
+            pass
 
         return titles

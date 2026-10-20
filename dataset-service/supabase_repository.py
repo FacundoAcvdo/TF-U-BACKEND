@@ -60,7 +60,7 @@ class SupabaseRepository:
         embedding_chunked_size=int,
         tipo: str = "dataset",
     ) -> None:
-        
+
         supabase = self.get_supabase_client(user_token)
 
         payload = {
@@ -73,11 +73,10 @@ class SupabaseRepository:
             "tipo": tipo,
         }
 
-        try: 
+        try:
             (supabase.table(self.table)
                 .insert(payload)
                 .execute())
-            
 
 
         except Exception as e:

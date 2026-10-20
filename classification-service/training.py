@@ -23,6 +23,7 @@ from sklearn.model_selection import (
     cross_val_predict,
     train_test_split,
 )
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import LinearSVC
@@ -30,6 +31,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     DataCollatorWithPadding,
+    EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
 )
@@ -39,16 +41,69 @@ from schemas import TrainingRequest
 
 MAX_CLASES = int(os.environ.get("MAX_CLASES", 7))
 
-def instanciar_clasificador_sklearn(nombre: str):
+
+class _WeightedTrainer(Trainer):
+    """Trainer con CrossEntropy ponderada por clase (desbalance 65/35)."""
+
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        etiquetas = inputs.get("labels")
+        resto = {k: v for k, v in inputs.items() if k != "labels"}
+        salidas = model(**resto)
+        logits = salidas.logits if hasattr(salidas, "logits") else salidas[0]
+        peso = None
+        if self._class_weights is not None:
+            peso = self._class_weights.to(logits.device)
+        import torch.nn.functional as _F
+        perdida = _F.cross_entropy(logits, etiquetas, weight=peso)
+        return (perdida, salidas) if return_outputs else perdida
+
+def _flotante(v, default: float, lo: float, hi: float) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, f))
+
+
+def _entero(v, default: int, lo: int, hi: int) -> int:
+    try:
+        i = int(float(v))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, i))
+
+
+def instanciar_clasificador_sklearn(nombre: str, hiper: dict | None = None):
+    hiper = hiper or {}
     if nombre == "Support Vector Machine":
-        return LinearSVC(random_state=42, max_iter=3000, class_weight="balanced")
+        c = _flotante(hiper.get("C"), 1.0, 0.01, 100.0)
+        mi = _entero(hiper.get("max_iter"), 3000, 100, 10000)
+        return (LinearSVC(random_state=42, max_iter=mi, class_weight="balanced", C=c),
+                {"C": c, "max_iter": mi})
     if nombre == "Random Forest":
-        return RandomForestClassifier(
-            n_estimators=100, random_state=42, class_weight="balanced", n_jobs=-1
-        )
+        ne = _entero(hiper.get("n_estimators"), 100, 10, 1000)
+        md_raw = hiper.get("max_depth", None)
+        if md_raw in (None, "", "auto", "null", "None"):
+            md = None
+        else:
+            md = _entero(md_raw, 0, 2, 100)
+            md = None if md == 0 else md
+        msl = _entero(hiper.get("min_samples_leaf"), 1, 1, 10)
+        return (RandomForestClassifier(
+            n_estimators=ne, max_depth=md, min_samples_leaf=msl,
+            random_state=42, class_weight="balanced", n_jobs=-1,
+        ), {"n_estimators": ne, "max_depth": md, "min_samples_leaf": msl})
     if nombre == "Naive Bayes":
-        return GaussianNB()
-    return LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")
+        vs = _flotante(hiper.get("var_smoothing"), 1e-9, 1e-12, 1e-3)
+        return GaussianNB(var_smoothing=vs), {"var_smoothing": vs}
+    c = _flotante(hiper.get("C"), 1.0, 0.01, 100.0)
+    mi = _entero(hiper.get("max_iter"), 1000, 100, 5000)
+    return (LogisticRegression(max_iter=mi, random_state=42, class_weight="balanced", C=c),
+            {"C": c, "max_iter": mi})
 
 
 def procesar_etiquetas_automatico(valores_raw: list[str]):
@@ -92,15 +147,6 @@ def validar_tamano_muestras(y_labels, data: TrainingRequest):
 
     clase_minoritaria = int(conteos.min())
     cantidad_clases = len(conteos)
-
-    if data.modelo == "BERT" and data.modo == "validacion_cruzada":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "BERT se entrena con un único conjunto de entrenamiento y prueba. "
-                "Seleccioná 'Entrenamiento y Prueba' para BERT."
-            ),
-        )
 
     if data.modo == "validacion_cruzada":
         k_folds = data.k if data.k in [5, 10] else 5
@@ -192,7 +238,7 @@ def calcular_metricas(y_true, y_pred, cantidad_clases: int):
 def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
     total_muestras = len(y_labels)
     cantidad_clases = len(clases_nombres)
-    clf = instanciar_clasificador_sklearn(data.modelo)
+    clf, hiper_usados = instanciar_clasificador_sklearn(data.modelo, data.hiperparametros)
 
     if data.modo == "validacion_cruzada":
         k_folds = data.k if data.k in [5, 10] else 5
@@ -246,11 +292,13 @@ def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: T
         "f1_score": f1,
         "precision": prec,
         "recall": rec,
+        "hiperparametros": hiper_usados,
     }
     torch.save(checkpoint, checkpoint_buffer)
     checkpoint_buffer.seek(0)
 
     fecha = datetime.now(timezone.utc).isoformat()
+    hiper_lineas = "\n".join(f"- `{k}`: **{v}**" for k, v in hiper_usados.items())
     mapping_lines = "\n".join(
         f"- `{clase}` → `{idx}`"
         for clase, idx in label_mapping.items()
@@ -284,6 +332,10 @@ def entrenar_sklearn(x_vectors, y_labels, label_mapping, clases_nombres, data: T
 - Precision weighted: **{prec:.4f}**
 - Recall weighted: **{rec:.4f}**
 
+## Hiperparámetros
+
+{hiper_lineas}
+
 ## Mapeo de clases
 
 {mapping_lines}
@@ -309,10 +361,10 @@ embeddings = encoder.encode(textos, normalize_embeddings=True)
 prediccion_id = clf.predict(embeddings)
 
 for texto, clase_id in zip(textos, prediccion_id):
-    print(texto, "->", checkpoint["clases_nombres"][int(clase_id)])
+    prediccion = (texto, checkpoint["clases_nombres"][int(clase_id)])
 
 # Matriz guardada en el checkpoint:
-print(checkpoint["matriz_confusion"])
+matriz = checkpoint["matriz_confusion"]
 ```
 
 ## Dependencias
@@ -351,76 +403,287 @@ class TextDataset(torch.utils.data.Dataset):
         return len(self.labels)
 
 
+MODELOS_BERT = {
+    "es": "dccuchile/distilbert-base-spanish-uncased",
+    "en": "distilbert-base-uncased",
+    "es_base": "dccuchile/bert-base-spanish-wwm-uncased",
+    "en_base": "google-bert/bert-base-uncased",
+    "en_mental": "mental/mental-roberta-base",
+}
+
+_TOKENIZERS: dict = {}
+
+_MARCAS_ES = (" que ", " de ", " la ", " el ", " en ", " una ", " para ",
+              " con ", " los ", " del ", " no ", " por ", " este ", " esta ")
+_MARCAS_EN = (" the ", " and ", " to ", " of ", " you ", " that ", " with ",
+              " for ", " this ", " are ", " was ", " have ", " not ")
+
+
+def detectar_idioma(textos: list[str], muestra: int = 100) -> str:
+    pts_es = pts_en = 0
+    for t in (textos or [])[:max(1, muestra)]:
+        s = f" {(t or '').lower()} "
+        if "ñ" in s or "á" in s or "é" in s or "í" in s or "ó" in s or "ú" in s or "¿" in s or "¡" in s:
+            pts_es += 2
+        pts_es += sum(1 for m in _MARCAS_ES if m in s)
+        pts_en += sum(1 for m in _MARCAS_EN if m in s)
+    return "en" if pts_en > pts_es else "es"
+
+
+def get_tokenizer(model_name: str):
+    tok = _TOKENIZERS.get(model_name)
+    if tok is None:
+        tok = AutoTokenizer.from_pretrained(model_name)
+        _TOKENIZERS[model_name] = tok
+    return tok
+
+
+def _ajustes_gpu() -> tuple[int, int, bool]:
+    try:
+        mayor, _ = torch.cuda.get_device_capability(0)
+    except Exception:
+        return 16, 32, True
+    fp16 = mayor >= 7
+    free_gb = 99.0
+    try:
+        free_b, _total_b = torch.cuda.mem_get_info(0)
+        free_gb = free_b / (1024 ** 3)
+    except Exception:
+        pass
+    if free_gb >= 6:
+        batch = 16
+    elif free_gb >= 3:
+        batch = 8
+    elif free_gb >= 1.5:
+        batch = 4
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio ocupado, intenta más tarde.",
+        )
+    return batch, batch * 2, fp16
+
+
 def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: TrainingRequest):
-    model_name = "dccuchile/bert-base-spanish-wwm-uncased"
+    hiper = getattr(data, "hiperparametros", None) or {}
+    pedido = str(hiper.get("bert_modelo", "auto") or "auto").lower()
+    if pedido not in ("auto", "es_base", "en_mental"):
+        pedido = "auto"
+    if pedido in ("es_base", "en_mental"):
+        idioma = "en" if pedido == "en_mental" else "es"
+        model_name = MODELOS_BERT[pedido]
+    else:
+        idioma = detectar_idioma(textos)
+        model_name = MODELOS_BERT["en"] if idioma == "en" else MODELOS_BERT["es_base"]
+    modo_rapido = bool(hiper.get("bert_rapido", False))
     cantidad_clases = len(clases_nombres)
+    es_cv = (data.modo == "validacion_cruzada")
+    k_folds = data.k if data.k in [5, 10] else 5
+    y_list = list(y_labels)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=cantidad_clases,
-        id2label={int(v): k for k, v in label_mapping.items()},
-        label2id={k: int(v) for k, v in label_mapping.items()},
-    )
-    model.to(DEVICE)
+    tokenizer = get_tokenizer(model_name)
+    model = None
+    if not es_cv:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=cantidad_clases,
+            id2label={int(v): k for k, v in label_mapping.items()},
+            label2id={k: int(v) for k, v in label_mapping.items()},
+        )
+        model.to(DEVICE)
+        if modo_rapido:
+            for n, p in model.named_parameters():
+                if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
+                    p.requires_grad = False
 
-    test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
-
-    x_train, x_test, y_train, y_test = train_test_split(
-        textos,
-        y_labels,
-        test_size=test_size,
-        stratify=y_labels,
-        random_state=42,
-    )
-
-    train_encodings = tokenizer(x_train, truncation=True, max_length=128)
-    test_encodings = tokenizer(x_test, truncation=True, max_length=128)
-
-    train_dataset = TextDataset(train_encodings, y_train)
-    test_dataset = TextDataset(test_encodings, y_test)
+    largos = sorted(len(t or "") for t in textos) if textos else [0]
+    p90 = largos[min(len(largos) - 1, int(len(largos) * 0.9))]
+    max_len = 256
     collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
-    temp_dir = tempfile.mkdtemp()
-
     try:
+        epocas_pedidas = int(float(hiper.get("bert_epocas", 0) or 0))
+    except (TypeError, ValueError):
+        epocas_pedidas = 0
+    if epocas_pedidas >= 1:
+        epocas = max(1, min(30, epocas_pedidas))
+    elif modo_rapido:
+        epocas = 10
+    elif len(textos) < 2000:
+        epocas = 15
+    else:
+        epocas = 8
+    temp_dir = tempfile.mkdtemp()
+    bt, be, usar_fp16 = _ajustes_gpu() if DEVICE == "cuda" else (8, 16, False)
+    if DEVICE == "cuda":
+        try:
+            pass
+        except Exception:
+            pass
+
+    def _nuevo_modelo():
+        m = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=cantidad_clases,
+            id2label={int(v): k for k, v in label_mapping.items()},
+            label2id={k: int(v) for k, v in label_mapping.items()},
+        )
+        m.to(DEVICE)
+        if modo_rapido:
+            for n, p in m.named_parameters():
+                if "classifier" not in n and "pre_classifier" not in n and "score" not in n:
+                    p.requires_grad = False
+        return m
+
+    def _args_en(tmp: str):
+        try:
+            lr_pedida = float(hiper.get("bert_lr", 0) or 0)
+        except (TypeError, ValueError):
+            lr_pedida = 0.0
+        lr = lr_pedida if 1e-6 <= lr_pedida <= 2e-4 else 5e-5
         args_deseados = {
-            "output_dir": temp_dir,
-            "num_train_epochs": 2,
-            "per_device_train_batch_size": 16 if DEVICE == "cuda" else 4,
-            "per_device_eval_batch_size": 32 if DEVICE == "cuda" else 8,
-            "eval_strategy": "no",
-            "evaluation_strategy": "no",
-            "save_strategy": "no",
+            "output_dir": tmp,
+            "num_train_epochs": epocas,
+            "per_device_train_batch_size": bt,
+            "per_device_eval_batch_size": be,
+            "eval_strategy": "epoch",
+            "evaluation_strategy": "epoch",
+            "logging_strategy": "epoch",
+            "logging_steps": 50,
+            "save_strategy": "epoch",
+            "save_total_limit": 1,
+            "load_best_model_at_end": True,
+            "metric_for_best_model": "eval_f1",
+            "greater_is_better": True,
+            "learning_rate": lr,
+            "warmup_ratio": 0.06,
             "use_cpu": DEVICE == "cpu",
-            "fp16": DEVICE == "cuda",
-            "group_by_length": True,
+            "fp16": usar_fp16,
+            "weight_decay": 0.0,
+            "group_by_length": False,
             "dataloader_num_workers": 2 if DEVICE == "cuda" else 0,
             "dataloader_pin_memory": DEVICE == "cuda",
             "report_to": "none",
         }
-
         soportados = set(inspect.signature(TrainingArguments.__init__).parameters)
         args_filtrados = {k: v for k, v in args_deseados.items() if k in soportados}
-
         if "eval_strategy" in args_filtrados and "evaluation_strategy" in args_filtrados:
             args_filtrados.pop("evaluation_strategy")
+        return TrainingArguments(**args_filtrados)
 
-        training_args = TrainingArguments(**args_filtrados)
+    historial_loss: list[str] = []
 
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=test_dataset,
-            data_collator=collator,
-        )
+    def _metricas_trainer(p):
+        y_predicha = np.asarray(p.predictions).argmax(axis=-1)
+        y_reales = np.asarray(p.label_ids)
+        return {
+            "accuracy": float(accuracy_score(y_reales, y_predicha)),
+            "f1": float(f1_score(y_reales, y_predicha, average="weighted", zero_division=0)),
+        }
 
-        trainer.train()
+    def _entrenar_y_predecir(modelo, tr_enc, y_tr, te_enc, y_te, guardar_en=None):
+        tmp = tempfile.mkdtemp()
+        try:
+            clases_ord = sorted(set(int(v) for v in y_tr))
+            conteo = compute_class_weight(
+                "balanced",
+                classes=np.asarray(clases_ord),
+                y=np.asarray(y_tr, dtype=int),
+            )
+            por_indice = {c: w for c, w in zip(clases_ord, conteo)}
+            pesos = torch.tensor(
+                [por_indice.get(c, 1.0) for c in range(cantidad_clases)],
+                dtype=torch.float32,
+            )
+            trainer_kwargs = {
+                "model": modelo,
+                "args": _args_en(tmp),
+                "train_dataset": TextDataset(tr_enc, y_tr),
+                "eval_dataset": TextDataset(te_enc, list(y_te)),
+                "data_collator": collator,
+                "compute_metrics": _metricas_trainer,
+                "callbacks": [EarlyStoppingCallback(early_stopping_patience=3)],
+            }
+            if "processing_class" in set(inspect.signature(Trainer.__init__).parameters):
+                trainer_kwargs["processing_class"] = tokenizer
+            else:
+                trainer_kwargs["tokenizer"] = tokenizer
+            tr = _WeightedTrainer(class_weights=pesos, **trainer_kwargs)
+            tr.train()
+            perdidas_ent = [h.get("loss") for h in tr.state.log_history if h.get("loss") is not None]
+            perdidas_val = [h.get("eval_loss") for h in tr.state.log_history if h.get("eval_loss") is not None]
+            f1_val = [h.get("eval_f1") for h in tr.state.log_history if h.get("eval_f1") is not None]
+            historial_loss.append(
+                f"- corrida {len(historial_loss) + 1}: "
+                f"loss_entrenamiento={perdidas_ent[-1]:.4f} "
+                f"loss_validacion={perdidas_val[-1]:.4f} "
+                f"f1_validacion={f1_val[-1]:.4f}"
+                if perdidas_ent and perdidas_val and f1_val else
+                f"- corrida {len(historial_loss) + 1}: "
+                f"loss_entrenamiento={perdidas_ent[-1]:.4f} "
+                f"loss_validacion={perdidas_val[-1]:.4f}"
+                if perdidas_ent and perdidas_val else
+                f"- corrida {len(historial_loss) + 1}: sin registros de pérdida"
+            )
+            pred = tr.predict(TextDataset(te_enc, list(y_te)))
+            yph = np.asarray(pred.predictions).argmax(axis=-1)
+            if guardar_en:
+                tr.save_model(guardar_en)
+                tokenizer.save_pretrained(guardar_en)
+            return yph, tr
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
-        prediction = trainer.predict(test_dataset)
-        y_pred = np.asarray(prediction.predictions).argmax(axis=-1)
-        y_eval = np.asarray(y_test)
+    try:
+        model_dir = os.path.join(temp_dir, "modelo_bert")
+        if es_cv:
+            skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+            folds = list(skf.split(np.zeros(len(y_list)), np.asarray(y_list)))
+            y_pred_full = np.zeros(len(y_list), dtype=int)
+            for j, (tr_i, te_i) in enumerate(folds):
+                m = _nuevo_modelo()
+                try:
+                    yph, _ = _entrenar_y_predecir(
+                        m,
+                        tokenizer([textos[i] for i in tr_i], truncation=True, max_length=max_len),
+                        [y_list[i] for i in tr_i],
+                        tokenizer([textos[i] for i in te_i], truncation=True, max_length=max_len),
+                        [y_list[i] for i in te_i],
+                        guardar_en=model_dir if j == len(folds) - 1 else None,
+                    )
+                    y_pred_full[np.asarray(te_i)] = np.asarray(yph).ravel()
+                finally:
+                    try:
+                        del m
+                    except Exception:
+                        pass
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+            y_pred = y_pred_full
+            y_eval = np.asarray(y_list)
+            n_tr = n_te = len(y_list)
+            detalle_modo = f"validación cruzada (k={k_folds}, se guarda último pliegue)"
+        else:
+            test_size = max(0.1, min(0.9, (data.porcentaje_prueba or 20) / 100.0))
+            x_train, x_test, y_train, y_test = train_test_split(
+                textos,
+                y_list,
+                test_size=test_size,
+                stratify=y_list,
+                random_state=42,
+            )
+            train_encodings = tokenizer(x_train, truncation=True, max_length=max_len)
+            test_encodings = tokenizer(x_test, truncation=True, max_length=max_len)
+            y_pred, trainer = _entrenar_y_predecir(
+                model, train_encodings, list(y_train), test_encodings, list(y_test),
+                guardar_en=model_dir,
+            )
+            y_eval = np.asarray(y_test)
+            n_tr, n_te = len(y_train), len(y_test)
+            detalle_modo = "porcentajes"
 
         (
             tp, fp, tn, fn,
@@ -428,11 +691,8 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
             matriz,
         ) = calcular_metricas(y_eval, y_pred, cantidad_clases)
 
-        model_dir = os.path.join(temp_dir, "modelo_bert")
-        trainer.save_model(model_dir)
-        tokenizer.save_pretrained(model_dir)
-
         fecha = datetime.now(timezone.utc).isoformat()
+        lineas_loss = "\n".join(historial_loss) if historial_loss else "- Sin registros."
         mapping_lines = "\n".join(
             f"- `{clase}` → `{idx}`"
             for clase, idx in label_mapping.items()
@@ -453,17 +713,26 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 
 - Dataset: **{data.dataset}**
 - Arquitectura base: **{model_name}**
+- Idioma detectado: **{idioma}**
+- Modo: **{"rápido (encoder congelado)" if modo_rapido else "completo"}**
+- Épocas: **{epocas}**
+- Max length: **{max_len}**
 - Fecha: **{fecha}**
 - Cantidad de clases: **{cantidad_clases}**
 
 ## Configuración y métricas
 
-- Muestras de entrenamiento: **{len(y_train)}**
-- Muestras de evaluación: **{len(y_test)}**
+- Validación: **{detalle_modo}**
+- Muestras de entrenamiento: **{n_tr}**
+- Muestras de evaluación: **{n_te}**
 - Accuracy: **{acc:.4f}**
 - F1-score weighted: **{f1:.4f}**
 - Precision weighted: **{prec:.4f}**
 - Recall weighted: **{rec:.4f}**
+
+## Pérdida por corrida (divergencias a la vista)
+
+{lineas_loss}
 
 ## Mapeo de clases
 
@@ -478,6 +747,10 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
 ```python
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+import logging
+from logging_utils import setup_service_logger
+logger = setup_service_logger("classification-service")
+
 
 ruta_modelo = "./modelo_bert"
 tokenizer = AutoTokenizer.from_pretrained(ruta_modelo)
@@ -489,7 +762,7 @@ inputs = tokenizer(
     return_tensors="pt",
     padding=True,
     truncation=True,
-    max_length=128,
+    max_length={max_len},
 )
 
 with torch.no_grad():
@@ -498,7 +771,7 @@ with torch.no_grad():
 
 for texto, clase_id in zip(textos, predicciones):
     clase_id = int(clase_id)
-    print(texto, "->", model.config.id2label[clase_id])
+    prediccion = (texto, model.config.id2label[clase_id])
 ```
 
 ## Dependencias
@@ -519,16 +792,25 @@ pip install torch transformers accelerate
         zip_buffer.seek(0)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        del model
         try:
+            del model
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
         except Exception:
             pass
 
     return (
         tp, fp, tn, fn,
         acc, f1, prec, rec,
-        len(y_labels), len(y_train), len(y_test),
+        len(y_labels), n_tr, n_te,
         zip_buffer, matriz,
     )

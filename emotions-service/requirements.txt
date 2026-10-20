@@ -6,10 +6,12 @@ numpy
 scikit-learn
 supabase
 storage3
-transformers
+transformers>=4.44.0,<4.49.0
 torch
 accelerate
 sentencepiece
 nltk
 
 chromadb>=0.5.5
+langid
+emoji
