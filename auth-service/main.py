@@ -76,7 +76,9 @@ async def login(data: LoginRequest, response: Response):
         "user": {
             "id": result.user.id,
             "email": result.user.email,
-        }
+        },
+        "access_token": result.session.access_token,
+        "expires_in": result.session.expires_in,
     }
 
 def _admin_client():

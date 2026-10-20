@@ -270,7 +270,7 @@ async def _proxy_service(request: Request, service: str, operation: str, user: d
                 method=request.method,
                 url=target_url,
                 headers=forwarded_headers,
-                content=body if request.method in ["POST", "PUT"] else None,
+                content=body if request.method in ["POST", "PUT", "PATCH", "DELETE"] else None,
                 params=dict(request.query_params),
             )
     except Exception as e:

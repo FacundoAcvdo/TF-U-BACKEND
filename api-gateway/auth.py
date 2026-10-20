@@ -1,5 +1,5 @@
 import os
-from fastapi import Cookie, HTTPException
+from fastapi import Cookie, Header, HTTPException
 from jwt import PyJWKClient
 import jwt
 
@@ -9,7 +9,11 @@ JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 jwks_client = PyJWKClient(JWKS_URL)
 
 
-def verify_jwt(access_token: str = Cookie(None)):
+def verify_jwt(access_token: str = Cookie(None), authorization: str = Header(None)):
+    if access_token is None and authorization:
+        esquema, _, credenciales = authorization.partition(" ")
+        if esquema.lower() == "bearer" and credenciales:
+            access_token = credenciales
     if access_token is None:
         raise HTTPException(401, "No autenticado")
 

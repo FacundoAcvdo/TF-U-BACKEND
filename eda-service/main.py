@@ -249,6 +249,18 @@ async def _compute_eda(
         if dataset.empty:
             raise HTTPException(status_code=400, detail="Dataset is empty")
 
+        clases = dataset["clase"] if "clase" in dataset.columns else None
+        sin_clases = (
+            clases is None
+            or bool(clases.isna().all())
+            or bool((clases[~clases.isna()].astype(str).str.strip() == "").all())
+        )
+        if sin_clases:
+            raise HTTPException(
+                status_code=422,
+                detail="El dataset no tiene clases. Cargá un dataset clasificado para calcular estadísticas.",
+            )
+
         result = build_eda_response(dataset)
         result["dataset_id"] = dataset_id
 

@@ -474,7 +474,7 @@ def entrenar_bert(textos, y_labels, label_mapping, clases_nombres, data: Trainin
         model_name = MODELOS_BERT[pedido]
     else:
         idioma = detectar_idioma(textos)
-        model_name = MODELOS_BERT["en_mental"] if idioma == "en" else MODELOS_BERT["es_base"]
+        model_name = MODELOS_BERT["en"] if idioma == "en" else MODELOS_BERT["es_base"]
     modo_rapido = bool(hiper.get("bert_rapido", False))
     cantidad_clases = len(clases_nombres)
     es_cv = (data.modo == "validacion_cruzada")
