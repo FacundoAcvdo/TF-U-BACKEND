@@ -1,0 +1,235 @@
+# Compose del backend.
+# Prerrequisito para dataset/classification/rag:
+#   docker build -f ml-base/Dockerfile -t proyecto/ml-base ml-base
+# Los volúmenes de datos se guardan en ./data, dentro de este repositorio.
+
+services:
+  auth-service:
+    build:
+      context: ./auth-service
+    expose:
+      - "5050"
+    env_file:
+      - ./auth-service/.env
+    networks:
+      - microservicios
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+    ports:
+      - "7500:7500"
+    env_file:
+      - ./api-gateway/.env
+    networks:
+      - microservicios
+
+  clustering-service:
+    build:
+      context: ./clustering-service
+    expose:
+      - "8081"
+    env_file:
+      - ./clustering-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  dataset-service:
+    build:
+      context: ./dataset-service
+    expose:
+      - "8082"
+    env_file:
+      - ./dataset-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  topicmodeling-service:
+    build:
+      context: ./topicmodeling-service
+    expose:
+      - "8083"
+    env_file:
+      - ./topicmodeling-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  wordcloud-service:
+    build:
+      context: ./wordcloud-service
+    expose:
+      - "8084"
+    env_file:
+      - ./wordcloud-service/.env
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  eda-service:
+    build:
+      context: ./eda-service
+    expose:
+      - "8085"
+    env_file:
+      - ./eda-service/.env
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  emotions-service:
+    build:
+      context: ./emotions-service
+    expose:
+      - "8086"
+    env_file:
+      - ./emotions-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  classification-service:
+    build:
+      context: ./classification-service
+    expose:
+      - "8087"
+    env_file:
+      - ./classification-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+      - ./data/modelos:/app/data/modelos
+    depends_on:
+      - chroma-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  rag-service:
+    build:
+      context: ./rag-service
+    expose:
+      - "8088"
+    env_file:
+      - ./rag-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+      - ./data/rag_docs:/app/data/rag_docs:ro
+    depends_on:
+      - chroma-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  cleaning-service:
+    build:
+      context: ./cleaning-service
+    expose:
+      - "8089"
+    env_file:
+      - ./cleaning-service/.env
+    volumes:
+      - ./data/temp_downloads:/app/data/temp_downloads
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  evolution-service:
+    build:
+      context: ./evolution-service
+    expose:
+      - "8090"
+    env_file:
+      - ./evolution-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  risk-service:
+    build:
+      context: ./risk-service
+    expose:
+      - "8091"
+    env_file:
+      - ./risk-service/.env
+    volumes:
+      - ./data/hf_cache:/root/.cache/huggingface
+    depends_on:
+      - chroma-service
+    networks:
+      - microservicios
+
+  report-service:
+    build:
+      context: ./report-service
+    expose:
+      - "8092"
+    env_file:
+      - ./report-service/.env
+    networks:
+      - microservicios
+
+  chroma-service:
+    image: chromadb/chroma
+    expose:
+      - "8000"
+    volumes:
+      - ./data/chroma-data:/data
+    networks:
+      - microservicios
+
+networks:
+  microservicios:
+    driver: bridge
