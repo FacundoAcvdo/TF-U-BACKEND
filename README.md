@@ -48,7 +48,7 @@ Todas las peticiones del cliente pasan por un **api-gateway** que valida el JWT 
 - **ChromaDB** como base vectorial.
 - **PyTorch, Transformers, sentence-transformers** para embeddings y modelos de clasificación.
 - **scikit-learn, UMAP, HDBSCAN, BERTopic** para clustering y tópicos.
-- **LangChain + Google Gemini / Groq** para el servicio RAG.
+- **Google Gemini / Groq / Ollama (Qwen3)** para el servicio RAG.
 - **pandas, numpy, matplotlib, reportlab** para análisis, gráficos y PDF.
 - **Docker Compose** para orquestación; imágenes con soporte CUDA para los servicios de ML.
 
@@ -142,7 +142,7 @@ Se listan solo las variables propias; las compartidas de las tablas anteriores t
 | `analysis-service` | `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS`, `VERIFY_MODEL_ID`, `VERIFY_VRAM_MB`, `GOOGLE_API_KEY`, `LLM_MODEL`, `TITLE_*`, `CHROMA_*` |
 | `evolution-service` | `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS`, `HUGGING_FACE_HUB_TOKEN`. Chroma está hardcodeado a `chroma-service:8000` / `documents` |
 | `classification-service` | `CHROMA_COLLECTION=documents`, `EMBEDDING_MODEL_NAME`, `MAX_CLASES=7`, `MODEL_STORAGE_PATH=/app/data/modelos`, `MODEL_TTL_HOURS=24`, `CLASSIFICATION_FORCE_DEVICE` (vacío = auto), `TOKENIZERS_PARALLELISM=false` |
-| `rag-service` | `CHROMA_COLLECTION=rag_docs`, `CHROMA_COLLECTION_DOCUMENTS`, `CHROMA_COLLECTION_CHUNKED`, `CHROMA_FALLBACK_LOCAL=false`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE=32`, `RAG_EMB_VRAM_MB=800`, `DOCS_PATH=/app/data/rag_docs`, `CHUNK_SIZE=2000`, `CHUNK_OVERLAP=200`, `RAG_INIT_ON_STARTUP=false`, `TOP_K=4`, `RETRIEVE_K=12`, `RERANK=true`, `RERANK_MODEL`, `RERANK_MIN_SCORE=-2.0`, `HISTORY_TAIL=4`, `HISTORY_MSG_CHARS=600`, `HISTORY_MAX_CHARS=2000`, `LLM_PROVIDER`, `GOOGLE_API_KEY`, `LLM_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
+| `rag-service` | `CHROMA_COLLECTION=rag_docs`, `CHROMA_COLLECTION_DOCUMENTS`, `CHROMA_COLLECTION_CHUNKED`, `CHROMA_FALLBACK_LOCAL=false`, `EMBEDDING_MODEL=intfloat/multilingual-e5-large`, `EMBEDDING_BATCH_SIZE=32`, `RAG_EMB_VRAM_MB=800`, `DOCS_PATH=/app/data/rag_docs`, `CHUNK_SIZE=2000`, `CHUNK_OVERLAP=200`, `RAG_INIT_ON_STARTUP=false`, `TOP_K=4`, `RETRIEVE_K=12`, `RERANK=true`, `RERANK_MODEL`, `RERANK_MIN_SCORE=-2.0`, `HISTORY_TAIL=4`, `HISTORY_MSG_CHARS=600`, `HISTORY_MAX_CHARS=2000`, `LLM_PROVIDER`, `GOOGLE_API_KEY`, `LLM_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL=qwen3:8b`, `OLLAMA_KEEP_ALIVE=5m`, `OLLAMA_NUM_CTX=4096`, `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
 | `report-service` | Sin variables propias; usa Supabase |
 
 El detalle completo de cada variable está documentado en el `.env.example` de cada carpeta; las variables de los
@@ -254,7 +254,7 @@ mantienen sus URLs configuradas individualmente.
 | `topicmodeling` | `POST /getTopics`, `POST /getTopicResults`, `GET /jobs` |
 | `classification` | `POST /detectar_menciones`, `GET /descargar_modelo`, `GET /jobs` |
 | `suicide` | `POST /analyzeRisk`, `POST /getResults`, `GET /jobs` |
-| `rag` | `POST /chat`, `POST /message`, `GET /chat`, `GET /chats`, `DELETE /chat`, `DELETE /chats`, `POST /activate_chat` |
+| `rag` | `POST /chat`, `POST /message`, `PATCH /chat/mode`, `GET /chat`, `GET /chats`, `DELETE /chat`, `DELETE /chats`, `POST /activate_chat` |
 | `report` | `POST /datos-graficos`, `GET /disponibles`, `POST /generar`, `GET /descargar/{job_id}`, `GET /jobs` |
 
 ## Jobs asíncronos
@@ -267,6 +267,22 @@ Los análisis pesados no bloquean la request. El runtime agrupado usa helpers co
 4. El frontend consulta `GET /<servicio>/jobs/<job_id>` hasta obtener un estado final.
 
 Los jobs sin actualización durante **30 minutos** se consideran obsoletos. Cada fila guarda `user_id`, `service`, `job_type`, `dataset_name`, `params`, `result`, `error_code` y `error_detail`, lo que permite listar el historial por usuario.
+
+## Modo privacidad del RAG
+
+Cada chat guarda `privacy_mode` por usuario. En modo estándar se mantiene el proveedor
+configurado (`LLM_PROVIDER=groq` o `google`). En modo privacidad, la recuperación sigue
+usando los embeddings existentes `intfloat/multilingual-e5-large` y Ollama genera la
+respuesta con `qwen3:8b`; el texto no se envía a Groq ni Gemini. `OLLAMA_KEEP_ALIVE=5m`
+hace que Ollama descargue el modelo de VRAM tras cinco minutos sin solicitudes. Después
+de levantar Compose, descargar el modelo una vez con:
+
+```bash
+docker compose exec ollama ollama pull qwen3:8b
+```
+
+Aplicá `_schemas/migrations/20261024_add_chat_privacy_mode.sql` en Supabase antes de
+usar el selector. La migración es necesaria para persistir la elección por chat/usuario.
 
 ## Base de datos
 

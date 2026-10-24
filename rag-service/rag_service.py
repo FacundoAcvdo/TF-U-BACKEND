@@ -2,6 +2,9 @@ import os
 import re
 import glob
 import threading
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
@@ -28,6 +31,11 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3.6-flash")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
+OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180"))
+OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
 
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "2000"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
@@ -236,6 +244,34 @@ class RAGService:
             top_p=0.9,
         )
 
+    def _invoke_local(self, prompt: str):
+        """Invoca Ollama bajo demanda; keep_alive permite liberar VRAM en idle."""
+        payload = json.dumps({
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "think": False,
+            "options": {"temperature": 0.2, "num_ctx": OLLAMA_NUM_CTX},
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            logger.exception(f"[rag_service] Ollama no disponible: {e}")
+            raise RuntimeError("Modelo local no disponible.") from e
+        message = data.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Ollama devolvió una respuesta vacía.")
+        return content
+
     def _init_stores(self):
         self.chroma_client = get_chroma_client()
         for key, coll_name in ALL_COLLECTIONS.items():
@@ -343,7 +379,9 @@ class RAGService:
         return self._initialized and self.llm is not None and len(self.stores) == 3
 
     def is_store_ready(self, collection: str) -> bool:
-        return self._initialized and collection in self.stores and self.llm is not None
+        return self._initialized and collection in self.stores and (
+            self.llm is not None or LLM_PROVIDER in ("google", "groq")
+        )
 
     def get_store(self, collection: str) -> Chroma:
         if collection not in self.stores:
@@ -357,6 +395,7 @@ class RAGService:
         collection: str = "rag_docs",
         filter: Optional[Dict] = None,
         k: Optional[int] = None,
+        privacy_mode: bool = False,
     ) -> Tuple[str, List[Document]]:
         """Consulta por colección con filtro opcional (para documents/chunked_chats)."""
         if not self.is_store_ready(collection):
@@ -398,14 +437,24 @@ class RAGService:
         history_str = _format_history(chat_history or [])
         prompt = self.prompts[collection]
         prompt_value = prompt.format(context=context, chat_history=history_str, question=question)
-        response = self.llm.invoke(prompt_value)
-
-        content = response.content if hasattr(response, "content") else str(response)
+        if privacy_mode:
+            content = self._invoke_local(prompt_value)
+        else:
+            if self.llm is None:
+                raise RuntimeError("Proveedor cloud no configurado.")
+            response = self.llm.invoke(prompt_value)
+            content = response.content if hasattr(response, "content") else str(response)
         return content, relevant_docs
 
-    def generate_title(self, question: str) -> str:
-        resp = self.llm.invoke(PROMPT_TITLE.format(question=question[:500]))
-        titulo = resp.content.strip().strip('"') if hasattr(resp,'content') else str(resp).strip()
+    def generate_title(self, question: str, privacy_mode: bool = False) -> str:
+        prompt = PROMPT_TITLE.format(question=question[:500])
+        if privacy_mode:
+            titulo = self._invoke_local(prompt).strip().strip('"')
+        else:
+            if self.llm is None:
+                raise RuntimeError("Proveedor cloud no configurado.")
+            resp = self.llm.invoke(prompt)
+            titulo = resp.content.strip().strip('"') if hasattr(resp,'content') else str(resp).strip()
         return titulo[:80]
 
 rag_service = RAGService()

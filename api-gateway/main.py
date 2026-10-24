@@ -216,6 +216,11 @@ async def gateway(service: str, operation: str, request: Request, user: dict = D
     return await _proxy_service(request, service, operation, user)
 
 
+@app.patch("/rag/chat/mode")
+async def rag_chat_mode_proxy(request: Request, user: dict = Depends(verify_jwt)):
+    return await _proxy_service(request, "rag", "chat/mode", user)
+
+
 @app.api_route("/{service}/jobs", methods=["GET"])
 async def jobs_list_proxy(service: str, request: Request, user: dict = Depends(verify_jwt)):
 

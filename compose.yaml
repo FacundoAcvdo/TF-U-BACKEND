@@ -100,6 +100,25 @@ services:
       - ./data/rag_docs:/app/data/rag_docs:ro
     depends_on:
       - chroma-service
+      - ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - microservicios
+
+  ollama:
+    image: ollama/ollama:latest
+    expose:
+      - "11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
     deploy:
       resources:
         reservations:
