@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Request, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from auth import verify_jwt
+from config import SERVICE_URL_ENV, ServiceConfigurationError, service_url
 import httpx
 import logging
-import os
 import time
 import uuid
 
@@ -24,22 +24,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-SERVICES = {
-    "clustering": os.getenv("CLUSTERING_SERVICE_URL"),
-    "dataset": os.getenv("DATASET_SERVICE_URL"),
-    "eda": os.getenv("EDA_SERVICE_URL"),
-    "emotions": os.getenv("EMOTIONS_SERVICE_URL"),
-    "topicmodeling": os.getenv("TOPIC_MODELING_SERVICE_URL"),
-    "wordcloud": os.getenv("WORDCLOUD_SERVICE_URL"),
-    "classification": os.getenv("CLASSIFICATION_SERVICE_URL"),
-    "rag": os.getenv("RAG_SERVICE_URL"),
-    "datacleaning": os.getenv("DATA_CLEANING_SERVICE_URL"),
-    "evolution": os.getenv("EVOLUTION_SERVICE_URL"),
-    "suicide": os.getenv("SUICIDE_SERVICE_URL"),
-    "report": os.getenv("REPORT_SERVICE_URL"),
-}
-
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -102,9 +86,11 @@ async def login_proxy(request: Request, response: Response):
     try:
         async with httpx.AsyncClient() as client:
             upstream = await client.post(
-                os.getenv("AUTH_SERVICE_URL") + "/auth/login",
+                service_url("auth", "/auth/login"),
                 json=await request.json(),
             )
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
 
@@ -124,13 +110,15 @@ async def me_proxy(request: Request, user: dict = Depends(verify_jwt)):
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             upstream = await client.get(
-                os.getenv("AUTH_SERVICE_URL") + "/auth/me",
+                service_url("auth", "/auth/me"),
                 headers={
                     "X-User-Token": user["raw_token"],
                     "X-User-ID": user["sub"],
                     "X-Request-ID": getattr(request.state, "request_id", ""),
                 },
             )
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
     return _passthrough_response(upstream)
@@ -141,13 +129,15 @@ async def logout_proxy(request: Request, response: Response, user: dict = Depend
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             upstream = await client.post(
-                os.getenv("AUTH_SERVICE_URL") + "/auth/logout",
+                service_url("auth", "/auth/logout"),
                 headers={
                     "X-User-Token": user["raw_token"],
                     "X-User-ID": user["sub"],
                     "X-Request-ID": getattr(request.state, "request_id", ""),
                 },
             )
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
 
@@ -174,11 +164,13 @@ async def _proxy_auth(request: Request, method: str, path: str, user: dict) -> R
         async with httpx.AsyncClient(timeout=None) as client:
             upstream = await client.request(
                 method=method,
-                url=os.getenv("AUTH_SERVICE_URL") + path,
+                url=service_url("auth", path),
                 headers=headers,
                 content=body if method in ["POST", "PUT", "PATCH", "DELETE"] else None,
                 params=dict(request.query_params),
             )
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
     if upstream.status_code >= 500:
@@ -243,10 +235,13 @@ async def descargar_proxy(service: str, job_id: str, request: Request, user: dic
 
 
 async def _proxy_service(request: Request, service: str, operation: str, user: dict) -> Response:
-    if service not in SERVICES:
+    if service not in SERVICE_URL_ENV or service == "auth":
         raise HTTPException(404, "Servicio no encontrado")
 
-    target_url = f"{SERVICES[service]}/{operation}"
+    try:
+        target_url = service_url(service, operation)
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
 
     EXCLUDED_HEADERS = {
         "host", "content-length", "connection",
