@@ -22,6 +22,7 @@ from supabase_service import (
     get_user_chats_with_stats,
     get_dataset_by_name,
     update_chat_title,
+    update_chat_privacy_mode,
 )
 import logging
 from logging_utils import setup_service_logger
@@ -62,13 +63,19 @@ def get_supabase(x_user_token: str = Header(..., alias="X-User-Token")):
 class ChatMessageRequest(BaseModel):
     mensaje: str
     dataset_name: str | None = None
+    privacy_mode: bool | None = None
 
 
 class CreateChatRequest(BaseModel):
     dataset_name: str | None = None
+    privacy_mode: bool = False
 
 class ActivateChatRequest(BaseModel):
     chat_id: str
+
+class ChatModeRequest(BaseModel):
+    privacy_mode: bool
+    dataset_name: str | None = None
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -110,13 +117,17 @@ async def create_chat(
                 raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' no encontrado para el usuario")
             dataset_id = row.get("dataset_id")
         chat_id = str(uuid.uuid4())
-        chat = create_chat_record(supabase, chat_id, x_user_id, dataset_id=dataset_id)
+        chat = create_chat_record(
+            supabase, chat_id, x_user_id, dataset_id=dataset_id,
+            privacy_mode=data.privacy_mode,
+        )
         return {
             "chat_id": chat_id,
             "fecha_creacion": chat.get("fecha_creacion") if chat else None,
             "dataset_id": dataset_id,
             "dataset_name": dataset_name,
             "activo": True,
+            "privacy_mode": bool(data.privacy_mode),
             "mensajes": [],
             "message": "Chat activo creado (anterior desactivado si existía en su grupo)"
         }
@@ -173,6 +184,11 @@ async def send_message(
         grupo = f"dataset '{dataset_name}'" if dataset_name else "rag_docs"
         raise HTTPException(status_code=404, detail=f"No hay chat activo para {grupo}. Crea uno con POST /chat primero.")
     chat_id = chat["chat_id"]
+    privacy_mode = (
+        data.privacy_mode
+        if data.privacy_mode is not None
+        else bool(chat.get("privacy_mode", False))
+    )
 
 
     mensajes_previos = get_chat_messages(supabase, chat_id, x_user_id)
@@ -192,7 +208,10 @@ async def send_message(
         raise HTTPException(status_code=503, detail=f"RAG service not ready para colección '{collection}'. Please try again later.")
 
     try:
-        respuesta, docs_relevantes = rag_service.query(pregunta, chat_history=historial_para_rag, collection=collection, filter=rag_filter)
+        respuesta, docs_relevantes = rag_service.query(
+            pregunta, chat_history=historial_para_rag, collection=collection,
+            filter=rag_filter, privacy_mode=privacy_mode,
+        )
     except RuntimeError as re:
         logger.exception(f"[main] RAG RuntimeError: {re}")
         raise HTTPException(status_code=503, detail="Servicio RAG no disponible. Intenta más tarde.")
@@ -214,7 +233,7 @@ async def send_message(
     titulo = None
     if es_primer and not chat.get("titulo"):
         try:
-            titulo = rag_service.generate_title(pregunta)
+            titulo = rag_service.generate_title(pregunta, privacy_mode=privacy_mode)
             update_chat_title(supabase, chat_id, x_user_id, titulo)
         except Exception as e:
             logger.warning(f"WARNING título: {e}")
@@ -223,7 +242,35 @@ async def send_message(
         "respuesta": msg_asistente,
         "pregunta": msg_usuario,
         "titulo": titulo,
+        "privacy_mode": privacy_mode,
     }
+
+
+@app.patch("/chat/mode")
+async def update_chat_mode(
+    data: ChatModeRequest = Body(...),
+    x_user_id: str = Header(..., alias="X-User-ID"),
+    supabase=Depends(get_supabase),
+):
+    try:
+        dataset_id = None
+        if data.dataset_name and data.dataset_name.strip():
+            dataset = get_dataset_by_name(supabase, x_user_id, data.dataset_name.strip())
+            if not dataset:
+                raise HTTPException(status_code=404, detail="Dataset no encontrado.")
+            dataset_id = dataset.get("dataset_id")
+        chat = get_active_chat(supabase, x_user_id, dataset_id=dataset_id)
+        if not chat:
+            raise HTTPException(status_code=404, detail="No hay chat activo.")
+        updated = update_chat_privacy_mode(
+            supabase, chat["chat_id"], x_user_id, data.privacy_mode,
+        )
+        return {"privacy_mode": bool(updated.get("privacy_mode", data.privacy_mode))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[main] Error actualizando modo del chat: {e}")
+        raise HTTPException(status_code=500, detail="Error interno actualizando modo.")
 
 
 @app.get("/chat")

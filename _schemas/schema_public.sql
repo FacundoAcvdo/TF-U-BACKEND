@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS "public"."chats" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "titulo" "text" DEFAULT ''::"text",
     "activo" boolean DEFAULT true NOT NULL,
-    "dataset_id" "uuid"
+    "dataset_id" "uuid",
+    "privacy_mode" boolean DEFAULT false NOT NULL
 );
 
 
@@ -1048,7 +1049,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 

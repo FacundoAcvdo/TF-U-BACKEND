@@ -9,7 +9,7 @@ Todas las peticiones del cliente pasan por un **api-gateway** que valida el JWT 
 ```text
 ┌──────────────┐      HTTP       ┌──────────────┐      JWT + proxy      ┌─────────────────────┐
 │  Frontend    │ ──────────────> │ api-gateway  │ ────────────────────> │  Microservicios     │
-│  (Next.js)   │  :7500          │   FastAPI    │                       │  FastAPI :8081-8092 │
+│  (Next.js)   │  :7500          │   FastAPI    │                       │ analysis-service    │
 └──────────────┘                 └──────┬───────┘                       └─────┬───────┬───────┘
                                         │                                     │       │
                                  ┌──────▼───────┐                    ┌────────▼──┐  ┌─▼──────────────┐
@@ -23,6 +23,8 @@ Todas las peticiones del cliente pasan por un **api-gateway** que valida el JWT 
 - **Supabase** se usa para autenticación, almacenamiento de datasets, estado de jobs y resultados agregados.
 - **ChromaDB** almacena los embeddings de los documentos y los chunks de chat.
 - Los servicios de ML cargan modelos de Hugging Face y comparten una imagen base con PyTorch (`ml-base`).
+- `analysis-service` agrupa clustering, topic modeling, wordcloud, EDA, emociones y riesgo en un único runtime;
+  el gateway conserva los prefijos públicos originales.
 
 ## Microservicios
 
@@ -32,14 +34,9 @@ Todas las peticiones del cliente pasan por un **api-gateway** que valida el JWT 
 | `auth-service` | 5050 | `/auth` | Login, logout, sesión y administración de usuarios | No |
 | `dataset-service` | 8082 | `/dataset` | Carga, parseo, chunking e indexación de datasets | Sí |
 | `cleaning-service` | 8089 | `/datacleaning` | Limpieza y anonimización del texto | No |
-| `eda-service` | 8085 | `/eda` | Estadísticas descriptivas y EDA | No |
-| `clustering-service` | 8081 | `/clustering` | Embeddings, UMAP y clustering | Sí |
-| `wordcloud-service` | 8084 | `/wordcloud` | Frecuencias y nube de palabras | No |
-| `emotions-service` | 8086 | `/emotions` | Detección de emociones ES/EN | Sí |
+| `analysis-service` | 8080 | `/eda`, `/clustering`, `/wordcloud`, `/emotions`, `/topicmodeling`, `/suicide` | Runtime agrupado de análisis | Sí |
 | `evolution-service` | 8090 | `/evolution` | Evolución temporal de palabras y emociones | No |
-| `topicmodeling-service` | 8083 | `/topicmodeling` | Modelado de tópicos con BERTopic | No |
 | `classification-service` | 8087 | `/classification` | Entrenamiento de clasificadores de menciones | Sí |
-| `risk-service` | 8091 | `/suicide` | Nivel de riesgo y verificación de menciones | No |
 | `rag-service` | 8088 | `/rag` | Chat RAG con LLM e historial | Sí |
 | `report-service` | 8092 | `/report` | Generación de informes y gráficos | No |
 | `chroma-service` | 8000 | — | Vector store (imagen oficial `chromadb/chroma`) | No |
@@ -51,7 +48,7 @@ Todas las peticiones del cliente pasan por un **api-gateway** que valida el JWT 
 - **ChromaDB** como base vectorial.
 - **PyTorch, Transformers, sentence-transformers** para embeddings y modelos de clasificación.
 - **scikit-learn, UMAP, HDBSCAN, BERTopic** para clustering y tópicos.
-- **LangChain + Google Gemini / Groq** para el servicio RAG.
+- **Google Gemini / Groq / Ollama (Qwen3)** para el servicio RAG.
 - **pandas, numpy, matplotlib, reportlab** para análisis, gráficos y PDF.
 - **Docker Compose** para orquestación; imágenes con soporte CUDA para los servicios de ML.
 
@@ -93,21 +90,21 @@ La siguiente tabla indica **en qué servicios el código realmente lee cada vari
 
 | Variable | Servicios que la usan | Descripción |
 | --- | --- | --- |
-| `SUPABASE_URL` | Todos los servicios Python (`api-gateway`, `auth`, `dataset`, `cleaning`, `eda`, `clustering`, `wordcloud`, `emotions`, `evolution`, `topicmodeling`, `classification`, `risk`, `rag`, `report`) | URL del proyecto Supabase |
+| `SUPABASE_URL` | Todos los servicios Python (`api-gateway`, `auth`, `dataset`, `cleaning`, `analysis-service`, `evolution`, `classification`, `rag`, `report`) | URL del proyecto Supabase |
 | `SUPABASE_ANON_KEY` | Todos menos `api-gateway` | Clave pública (`anon` / publishable) |
-| `SUPABASE_SECRET_KEY` | `dataset`, `cleaning`, `topicmodeling` | Clave de servicio (service role) |
+| `SUPABASE_SECRET_KEY` | `dataset`, `cleaning`, `analysis-service` | Clave de servicio (service role) |
 | `SUPABASE_SERVICE_ROLE_KEY` | `auth` | Clave de servicio para administrar usuarios |
-| `SUPABASE_DATASETS_TABLE` | `dataset`, `cleaning`, `topicmodeling` | Tabla de datasets (por defecto `datasets`) |
-| `CHROMA_HOST` / `CHROMA_PORT` | `dataset`, `cleaning`, `eda`, `clustering`, `wordcloud`, `emotions`, `topicmodeling`, `risk`, `rag` | Host y puerto de Chroma. En Docker: `chroma-service` / `8000`. `classification` y `evolution` los tienen hardcodeados |
-| `CHROMA_COLLECTION` | `classification`, `cleaning`, `eda`, `clustering`, `wordcloud`, `emotions`, `risk`, `rag` | Colección de documentos (`documents`) |
-| `CHROMA_COLLECTION_NAME` | `dataset`, `topicmodeling` | Nombre de la colección de documentos (equivalente a `CHROMA_COLLECTION`) |
-| `CHROMA_CHUNKED_COLLECTION` | `risk` | Colección de chunks de chat (`chunked_chats`) |
+| `SUPABASE_DATASETS_TABLE` | `dataset`, `cleaning`, `analysis-service` | Tabla de datasets (por defecto `datasets`) |
+| `CHROMA_HOST` / `CHROMA_PORT` | `dataset`, `cleaning`, `analysis-service`, `rag` | Host y puerto de Chroma. En Docker: `chroma-service` / `8000`. `classification` y `evolution` los tienen hardcodeados |
+| `CHROMA_COLLECTION` | `classification`, `cleaning`, `analysis-service`, `rag` | Colección de documentos (`documents`) |
+| `CHROMA_COLLECTION_NAME` | `dataset`, `analysis-service` | Nombre de la colección de documentos (equivalente a `CHROMA_COLLECTION`) |
+| `CHROMA_CHUNKED_COLLECTION` | `analysis-service` | Colección de chunks de chat (`chunked_chats`) |
 | `CHROMA_CHUNKED_COLLECTION_NAME` | `dataset` | Colección de chunks de chat (`chunked_chats`) |
 | `CHROMA_COLLECTION_DOCUMENTS` / `CHROMA_COLLECTION_CHUNKED` | `rag` | Colecciones auxiliares usadas por el chatbot del dataset |
-| `CHROMA_PAGE_SIZE` | `cleaning`, `eda`, `clustering`, `wordcloud`, `emotions`, `topicmodeling`, `risk` | Tamaño de página al leer Chroma (`2000`) |
-| `CHROMA_TOKEN` | `dataset`, `topicmodeling` | Token opcional de Chroma. `topicmodeling` lo declara en `Settings` aunque el cliente actual no lo envía |
+| `CHROMA_PAGE_SIZE` | `cleaning`, `analysis-service` | Tamaño de página al leer Chroma (`2000`) |
+| `CHROMA_TOKEN` | `dataset`, `analysis-service` | Token opcional de Chroma. `analysis-service` lo declara para topic modeling aunque el cliente actual no lo envía |
 | `CHROMA_FALLBACK_LOCAL` | `rag` | Si es `true`, usa Chroma persistente local cuando no hay servidor |
-| `HF_TOKEN` | `dataset`, `emotions`, `evolution`, `topicmodeling`, `classification`, `risk`, `rag` | Token de Hugging Face para descargar modelos. `evolution` también acepta `HUGGING_FACE_HUB_TOKEN` |
+| `HF_TOKEN` | `dataset`, `analysis-service`, `evolution`, `classification`, `rag` | Token de Hugging Face para descargar modelos. `evolution` también acepta `HUGGING_FACE_HUB_TOKEN` |
 | `TOKENIZERS_PARALLELISM` | `classification` | Desactiva el paralelismo de tokenizers (`false`) |
 | `CORS_ORIGINS` | `dataset` | Orígenes permitidos, separados por coma. Es obligatoria en ese servicio |
 | `LOG_LEVEL` | Todos | Nivel de logging (`INFO` por defecto) |
@@ -120,14 +117,14 @@ La siguiente tabla indica **en qué servicios el código realmente lee cada vari
 
 | Variable | Servicios donde tiene efecto | Default | Qué controla |
 | --- | --- | --- | --- |
-| `WARMUP` | `emotions`, `evolution`, `rag` | `true` | Precarga de modelos al iniciar. Con `false` la carga queda lazy |
-| `MODEL_TTL_SECONDS` | `dataset`, `emotions`, `evolution`, `risk`, `rag` | `600` | Segundos de inactividad antes de descargar un `ModelSlot` |
-| `MODEL_VRAM_MARGIN_MB` | `dataset`, `emotions`, `evolution`, `risk`, `rag`, `clustering`, `topicmodeling` | `512` | VRAM adicional que se exige libre antes de cargar un modelo |
-| `MODEL_EVICT_POLL_SECONDS` | `dataset`, `emotions`, `evolution`, `risk`, `rag` | `0` (automático) | Cada cuántos segundos el hilo de evicción revisa si puede liberar el modelo |
+| `WARMUP` | `analysis-service`, `evolution`, `rag` | `true` | Precarga de modelos al iniciar. Con `false` la carga queda lazy |
+| `MODEL_TTL_SECONDS` | `dataset`, `analysis-service`, `evolution`, `rag` | `600` | Segundos de inactividad antes de descargar un `ModelSlot` |
+| `MODEL_VRAM_MARGIN_MB` | `dataset`, `analysis-service`, `evolution`, `rag` | `512` | VRAM adicional que se exige libre antes de cargar un modelo |
+| `MODEL_EVICT_POLL_SECONDS` | `dataset`, `analysis-service`, `evolution`, `rag` | `0` (automático) | Cada cuántos segundos el hilo de evicción revisa si puede liberar el modelo |
 
 Detalles que no son obvios:
 
-- `clustering` y `topicmodeling` solo llaman a `check_fits_or_raise()`, por lo que únicamente les afecta `MODEL_VRAM_MARGIN_MB`; no instancian `ModelSlot` y por eso `WARMUP`, `MODEL_TTL_SECONDS` y `MODEL_EVICT_POLL_SECONDS` no hacen nada en ellos.
+- Los módulos `clustering` y `topicmodeling` solo llaman a `check_fits_or_raise()`, por lo que únicamente les afecta `MODEL_VRAM_MARGIN_MB`; no instancian `ModelSlot` y por eso `WARMUP`, `MODEL_TTL_SECONDS` y `MODEL_EVICT_POLL_SECONDS` no hacen nada en ellos.
 - `classification` tiene una copia de `model_cache.py` pero no la importa. Su `MODEL_TTL_HOURS` es distinto: controla cuántas horas se conservan los ZIP de modelos entrenados en disco.
 - `dataset` usa `ModelSlot` para el modelo de embeddings, pero no llama a `warmup_enabled()`: su `WARMUP` no tiene efecto.
 - `risk` usa `ModelSlot` solo para el verificador RoBERTa; su `WARMUP` tampoco se lee.
@@ -142,18 +139,14 @@ Se listan solo las variables propias; las compartidas de las tablas anteriores t
 | `auth-service` | `SUPABASE_SERVICE_ROLE_KEY` |
 | `dataset-service` | `APP_NAME`, `APP_VERSION`, `MAX_UPLOAD_SIZE_MB=50`, `INTERNAL_SERVICE_TOKEN`, `EMBEDDING_PROVIDER=local`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE=64`, `EMBEDDING_DEVICE=auto`, `EMBEDDING_FP16=true`, `EMBEDDING_VRAM_MB=1500`, `INGEST_CHUNK_SIZE=2000`, `CHAT_CHUNK_SIZE=20`, `CHAT_CHUNK_OVERLAP=4`, `CORS_ORIGINS`, `CHROMA_CHUNKED_COLLECTION_NAME`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
 | `cleaning-service` | `CLEANING_DOWNLOAD_PATH=./data/temp_downloads` |
-| `eda-service` | Sin variables propias; usa Supabase y `CHROMA_*` |
-| `clustering-service` | `MODEL_VRAM_MARGIN_MB=512` |
-| `wordcloud-service` | Sin variables propias; usa Supabase y `CHROMA_*` |
-| `emotions-service` | `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` (los modelos ES/EN están hardcodeados en `emotion_service.py`) |
+| `analysis-service` | `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS`, `VERIFY_MODEL_ID`, `VERIFY_VRAM_MB`, `GOOGLE_API_KEY`, `LLM_MODEL`, `TITLE_*`, `CHROMA_*` |
 | `evolution-service` | `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS`, `HUGGING_FACE_HUB_TOKEN`. Chroma está hardcodeado a `chroma-service:8000` / `documents` |
-| `topicmodeling-service` | `APP_NAME`, `APP_VERSION`, `GOOGLE_API_KEY`, `LLM_MODEL=gemini-2.0-flash`, `TITLE_ENABLED=true`, `TITLE_BATCH_SIZE=20`, `TITLE_MAX_CHARS_PER_DOC=400`, `CHROMA_TOKEN`, `MODEL_VRAM_MARGIN_MB` |
 | `classification-service` | `CHROMA_COLLECTION=documents`, `EMBEDDING_MODEL_NAME`, `MAX_CLASES=7`, `MODEL_STORAGE_PATH=/app/data/modelos`, `MODEL_TTL_HOURS=24`, `CLASSIFICATION_FORCE_DEVICE` (vacío = auto), `TOKENIZERS_PARALLELISM=false` |
-| `risk-service` | `CHROMA_CHUNKED_COLLECTION=chunked_chats`, `VERIFY_MODEL_ID`, `VERIFY_VRAM_MB=1500`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
-| `rag-service` | `CHROMA_COLLECTION=rag_docs`, `CHROMA_COLLECTION_DOCUMENTS`, `CHROMA_COLLECTION_CHUNKED`, `CHROMA_FALLBACK_LOCAL=false`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE=32`, `RAG_EMB_VRAM_MB=800`, `DOCS_PATH=/app/data/rag_docs`, `CHUNK_SIZE=2000`, `CHUNK_OVERLAP=200`, `RAG_INIT_ON_STARTUP=false`, `TOP_K=4`, `RETRIEVE_K=12`, `RERANK=true`, `RERANK_MODEL`, `RERANK_MIN_SCORE=-2.0`, `HISTORY_TAIL=4`, `HISTORY_MSG_CHARS=600`, `HISTORY_MAX_CHARS=2000`, `LLM_PROVIDER`, `GOOGLE_API_KEY`, `LLM_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
+| `rag-service` | `CHROMA_COLLECTION=rag_docs`, `CHROMA_COLLECTION_DOCUMENTS`, `CHROMA_COLLECTION_CHUNKED`, `CHROMA_FALLBACK_LOCAL=false`, `EMBEDDING_MODEL=intfloat/multilingual-e5-large`, `EMBEDDING_BATCH_SIZE=32`, `RAG_EMB_VRAM_MB=800`, `DOCS_PATH=/app/data/rag_docs`, `CHUNK_SIZE=2000`, `CHUNK_OVERLAP=200`, `RAG_INIT_ON_STARTUP=false`, `TOP_K=4`, `RETRIEVE_K=12`, `RERANK=true`, `RERANK_MODEL`, `RERANK_MIN_SCORE=-2.0`, `HISTORY_TAIL=4`, `HISTORY_MSG_CHARS=600`, `HISTORY_MAX_CHARS=2000`, `LLM_PROVIDER`, `GOOGLE_API_KEY`, `LLM_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL=qwen3:8b`, `OLLAMA_KEEP_ALIVE=5m`, `OLLAMA_NUM_CTX=4096`, `WARMUP`, `MODEL_TTL_SECONDS`, `MODEL_VRAM_MARGIN_MB`, `MODEL_EVICT_POLL_SECONDS` |
 | `report-service` | Sin variables propias; usa Supabase |
 
-El detalle completo de cada variable está documentado en el `.env.example` de cada carpeta.
+El detalle completo de cada variable está documentado en el `.env.example` de cada carpeta; las variables de los
+análisis agrupados están en `analysis-service/.env.example`.
 
 ## Ejecución con Docker
 
@@ -161,7 +154,7 @@ El `compose.yaml` de la raíz de este repositorio levanta todos los microservici
 
 ### 1. Construir la imagen base de ML
 
-Los servicios `dataset-service`, `classification-service` y `rag-service` usan `FROM proyecto/ml-base`, por lo que la imagen debe existir antes de construir esos servicios:
+Los servicios `dataset-service`, `classification-service`, `rag-service` y `analysis-service` usan `FROM proyecto/ml-base`, por lo que la imagen debe existir antes de construir esos servicios:
 
 ```bash
 docker build -f ml-base/Dockerfile -t proyecto/ml-base ml-base
@@ -239,6 +232,13 @@ Cada servicio carga su `.env` desde su propio directorio (`pydantic-settings` o 
 /{servicio}/descargar/{id}    -> descarga de resultados
 ```
 
+El gateway centraliza el mapa explícito de servicios en `api-gateway/config.py`.
+Las URLs pueden incluir una barra final, que se normaliza al unirlas con las rutas.
+Cada URL se valida al resolver el servicio; si falta o no usa `http`/`https` con
+un host válido, la petición se rechaza con un error de configuración en lugar de
+intentar construir una URL inválida. Los prefijos agrupados de `analysis-service`
+mantienen sus URLs configuradas individualmente.
+
 ### Endpoints por servicio
 
 | Servicio | Endpoints |
@@ -254,12 +254,12 @@ Cada servicio carga su `.env` desde su propio directorio (`pydantic-settings` o 
 | `topicmodeling` | `POST /getTopics`, `POST /getTopicResults`, `GET /jobs` |
 | `classification` | `POST /detectar_menciones`, `GET /descargar_modelo`, `GET /jobs` |
 | `suicide` | `POST /analyzeRisk`, `POST /getResults`, `GET /jobs` |
-| `rag` | `POST /chat`, `POST /message`, `GET /chat`, `GET /chats`, `DELETE /chat`, `DELETE /chats`, `POST /activate_chat` |
+| `rag` | `POST /chat`, `POST /message`, `PATCH /chat/mode`, `GET /chat`, `GET /chats`, `DELETE /chat`, `DELETE /chats`, `POST /activate_chat` |
 | `report` | `POST /datos-graficos`, `GET /disponibles`, `POST /generar`, `GET /descargar/{job_id}`, `GET /jobs` |
 
 ## Jobs asíncronos
 
-Los análisis pesados no bloquean la request:
+Los análisis pesados no bloquean la request. El runtime agrupado usa helpers compartidos para persistir jobs y configurar logging, sin cambiar sus contratos:
 
 1. El servicio crea un registro en la tabla `jobs` de Supabase (`status = queued`).
 2. Responde `202 Accepted` con `{ "job_id": "...", "status": "queued" }`.
@@ -267,6 +267,22 @@ Los análisis pesados no bloquean la request:
 4. El frontend consulta `GET /<servicio>/jobs/<job_id>` hasta obtener un estado final.
 
 Los jobs sin actualización durante **30 minutos** se consideran obsoletos. Cada fila guarda `user_id`, `service`, `job_type`, `dataset_name`, `params`, `result`, `error_code` y `error_detail`, lo que permite listar el historial por usuario.
+
+## Modo privacidad del RAG
+
+Cada chat guarda `privacy_mode` por usuario. En modo estándar se mantiene el proveedor
+configurado (`LLM_PROVIDER=groq` o `google`). En modo privacidad, la recuperación sigue
+usando los embeddings existentes `intfloat/multilingual-e5-large` y Ollama genera la
+respuesta con `qwen3:8b`; el texto no se envía a Groq ni Gemini. `OLLAMA_KEEP_ALIVE=5m`
+hace que Ollama descargue el modelo de VRAM tras cinco minutos sin solicitudes. Después
+de levantar Compose, descargar el modelo una vez con:
+
+```bash
+docker compose exec ollama ollama pull qwen3:8b
+```
+
+Aplicá `_schemas/migrations/20261024_add_chat_privacy_mode.sql` en Supabase antes de
+usar el selector. La migración es necesaria para persistir la elección por chat/usuario.
 
 ## Base de datos
 
@@ -309,15 +325,15 @@ supabase db dump --linked --schema public --keep-comments -f _schemas/schema_pub
 
 Los servicios de ML tienen una copia de `model_cache.py`. El comportamiento efectivo depende de cómo lo use cada uno:
 
-- `dataset`, `emotions`, `evolution`, `risk` y `rag` instancian `ModelSlot`: carga perezosa, control de admisión por VRAM, TTL y evicción.
-- `clustering` y `topicmodeling` solo usan `check_fits_or_raise()`: verifican VRAM antes de ejecutar, pero no mantienen modelos cacheados.
+- `dataset`, los módulos de `analysis-service`, `evolution` y `rag` instancian `ModelSlot`: carga perezosa, control de admisión por VRAM, TTL y evicción.
+- Los módulos `clustering` y `topicmodeling` de `analysis-service` solo usan `check_fits_or_raise()`: verifican VRAM antes de ejecutar, pero no mantienen modelos cacheados.
 - `classification` no importa `model_cache.py`.
 
 Variables y alcance exacto: ver [Caché de modelos y VRAM](#3-caché-de-modelos-y-vram). En resumen:
 
-- Evicción automática tras `MODEL_TTL_SECONDS` (600 s por defecto) sin uso en `dataset`, `emotions`, `evolution`, `risk` y `rag`.
-- Margen de seguridad de `MODEL_VRAM_MARGIN_MB` (512 MB por defecto) en `dataset`, `emotions`, `evolution`, `risk`, `rag`, `clustering` y `topicmodeling`.
-- `WARMUP=false` para evitar precargar modelos al iniciar solo en `emotions`, `evolution` y `rag`.
+- Evicción automática tras `MODEL_TTL_SECONDS` (600 s por defecto) sin uso en `dataset`, `analysis-service`, `evolution` y `rag`.
+- Margen de seguridad de `MODEL_VRAM_MARGIN_MB` (512 MB por defecto) en `dataset`, `analysis-service`, `evolution` y `rag`.
+- `WARMUP=false` para evitar precargar modelos al iniciar en `analysis-service`, `evolution` y `rag`.
 - Respuesta **HTTP 503** (`ModelBusyError`) cuando no hay VRAM suficiente para cargar un modelo.
 
 Si no hay GPU, los servicios funcionan en CPU. Algunos permiten forzar el dispositivo con `CLASSIFICATION_FORCE_DEVICE` o `EMBEDDING_DEVICE`.
@@ -326,7 +342,7 @@ Modelos principales:
 
 - Embeddings: `sentence-transformers/all-MiniLM-L6-v2`, `intfloat/multilingual-e5-large`.
 - Emociones: `pysentimiento/robertuito-base-uncased-emotion` (ES), `j-hartmann/emotion-english-distilroberta-base` (EN).
-- Riesgo: modelo propio (`risk-service/model_artifacts/risk_model.pkl`) + verificación con `vibhorag101/roberta-base-suicide-prediction-phr`.
+- Riesgo: modelo propio (`analysis-service/risk/model_artifacts/risk_model.pkl`) + verificación con `vibhorag101/roberta-base-suicide-prediction-phr`.
 - Tópicos: BERTopic + títulos con Gemini.
 - RAG: embeddings multilingües, reranking con cross-encoder y LLM Gemini/Groq.
 
@@ -340,7 +356,7 @@ Modelos principales:
 
 - No commitear archivos `.env` (están en `.gitignore`); solo se versionan los `.env.example` con valores de ejemplo.
 - Rotar periódicamente las claves de Supabase, Hugging Face, Gemini y Groq.
-- La `service role key` solo debe estar en `auth-service`, `dataset-service`, `cleaning-service` y `topicmodeling-service`.
+- La `service role key` solo debe estar en `auth-service`, `dataset-service`, `cleaning-service` y `analysis-service`.
 - En producción, servir el gateway detrás de HTTPS y no exponer los microservicios internos.
 - Las cookies usan `httpOnly` y `samesite=lax`; para HTTPS conviene habilitar `secure`.
 

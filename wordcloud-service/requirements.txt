@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-pydantic
-matplotlib
-wordcloud
-nltk
-supabase
-storage3
-chromadb>=0.5.5

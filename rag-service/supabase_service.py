@@ -140,8 +140,20 @@ def deactivate_active_chats(supabase, user_id: str, dataset_id: Optional[str] = 
         logger.exception(f"[supabase_service] ERROR deactivate_active_chats: {e}")
         raise HTTPException(status_code=500, detail="Error interno desactivando chats previos.")
 
-def create_chat_record(supabase, chat_id: str, user_id: str, dataset_id: Optional[str] = None):
-    payload = {"chat_id": chat_id, "user_id": user_id, "activo": True, "dataset_id": dataset_id}
+def create_chat_record(
+    supabase,
+    chat_id: str,
+    user_id: str,
+    dataset_id: Optional[str] = None,
+    privacy_mode: bool = False,
+):
+    payload = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "activo": True,
+        "dataset_id": dataset_id,
+        "privacy_mode": bool(privacy_mode),
+    }
     try:
         deactivate_active_chats(supabase, user_id, dataset_id)
         resp = supabase.table("chats").insert(payload).execute()
@@ -159,14 +171,32 @@ def create_chat_record(supabase, chat_id: str, user_id: str, dataset_id: Optiona
                 return resp.data[0] if resp.data else None
             except Exception as e2:
                 raise HTTPException(status_code=500, detail="Error interno creando chat activo.")
+        if "privacy_mode" in msg:
+            logger.warning(f"[supabase_service] WARNING columna privacy_mode no existe, reintentando sin ella: {e}")
+            fallback = {**payload}
+            fallback.pop("privacy_mode", None)
+            try:
+                resp = supabase.table("chats").insert(fallback).execute()
+                return resp.data[0] if resp.data else None
+            except Exception as e2:
+                raise HTTPException(status_code=500, detail="Error interno creando chat sin modo privacidad.")
         if "dataset_id" in msg:
             logger.warning(f"[supabase_service] WARNING columna dataset_id no existe, reintentando sin ella: {e}")
-            fallback = {"chat_id": chat_id, "user_id": user_id, "activo": True}
+            fallback = {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "activo": True,
+                "privacy_mode": bool(privacy_mode),
+            }
             try:
                 deactivate_active_chats(supabase, user_id, None)
                 resp = supabase.table("chats").insert(fallback).execute()
                 return resp.data[0] if resp.data else None
             except Exception as e3:
+                if "privacy_mode" in str(e3).lower():
+                    fallback.pop("privacy_mode", None)
+                    resp = supabase.table("chats").insert(fallback).execute()
+                    return resp.data[0] if resp.data else None
                 raise HTTPException(status_code=500, detail="Error interno creando chat fallback.")
         logger.exception(f"[supabase_service] ERROR insert chats: {e}")
         raise HTTPException(status_code=500, detail="Error interno creando chat en Supabase.")
@@ -223,7 +253,14 @@ def get_active_chat_with_messages(supabase, user_id: str, dataset_id: Optional[s
         return None
     mensajes_raw = get_chat_messages(supabase, chat["chat_id"], user_id)
     mensajes = [_to_public_mensaje(m) for m in mensajes_raw]
-    return {"chat_id": chat_full.get("chat_id"), "titulo": chat_full.get("titulo"), "fecha_creacion": chat_full.get("fecha_creacion"), "dataset_id": chat_full.get("dataset_id"), "mensajes": mensajes}
+    return {
+        "chat_id": chat_full.get("chat_id"),
+        "titulo": chat_full.get("titulo"),
+        "fecha_creacion": chat_full.get("fecha_creacion"),
+        "dataset_id": chat_full.get("dataset_id"),
+        "privacy_mode": bool(chat_full.get("privacy_mode", False)),
+        "mensajes": mensajes,
+    }
 
 def get_user_chats_with_stats(supabase, user_id: str) -> List[Dict[str, Any]]:
     chats = _get_user_chats(supabase, user_id)
@@ -264,3 +301,25 @@ def delete_all_chats(supabase, user_id: str):
 
 def update_chat_title(supabase, chat_id, user_id, titulo):
     supabase.table("chats").update({"titulo": titulo}).eq("chat_id", chat_id).eq("user_id", user_id).execute()
+
+
+def update_chat_privacy_mode(supabase, chat_id: str, user_id: str, privacy_mode: bool):
+    try:
+        resp = (
+            supabase.table("chats")
+            .update({"privacy_mode": bool(privacy_mode)})
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Chat no encontrado.")
+        return resp.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[supabase_service] ERROR update privacy mode: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Falta aplicar la migración privacy_mode en la tabla chats.",
+        )
