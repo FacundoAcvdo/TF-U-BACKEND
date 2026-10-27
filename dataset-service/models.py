@@ -78,6 +78,8 @@ class DatasetInfo:
 
     created_at: str
 
+    anonymization: dict[str, Any] | None = None
+
 @dataclass
 class ChromaDocuments:
 

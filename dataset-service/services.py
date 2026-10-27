@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 import math
@@ -14,6 +15,7 @@ from models import (
     ChromaDocuments,
     Document,
 )
+from anonymization_service import AnonymizationService
 from parsers import ParserFactory
 from supabase_repository import (
 
@@ -42,6 +44,7 @@ class DatasetService:
         supabase_repository: SupabaseRepository,
         chroma_repository: ChromaRepository,
         embedding_provider: EmbeddingProvider,
+        anonymization_service: AnonymizationService | None = None,
     ) -> None:
 
         self.supabase = supabase_repository
@@ -49,6 +52,10 @@ class DatasetService:
         self.chroma = chroma_repository
 
         self.embedding_provider = embedding_provider
+
+        self.anonymization_service = (
+            anonymization_service or AnonymizationService()
+        )
 
     async def create_dataset(
         self,
@@ -80,6 +87,7 @@ class DatasetService:
         )
 
 
+        phase_started = time.perf_counter()
         documents = await asyncio.to_thread(
             self._parse_documents,
             content=content,
@@ -93,7 +101,19 @@ class DatasetService:
             formato_fecha=formato_fecha,
             es_chat=es_chat,
         )
+        parse_ms = int((time.perf_counter() - phase_started) * 1000)
 
+        phase_started = time.perf_counter()
+        anonymization = await asyncio.to_thread(
+            self.anonymization_service.anonymize_documents,
+            documents,
+            es_chat=es_chat,
+        )
+        anonymization_ms = int((time.perf_counter() - phase_started) * 1000)
+
+        documents = anonymization.documents
+
+        phase_started = time.perf_counter()
         dataset = self._build_dataset_document(
             dataset_id=dataset_id,
             user_id=user_id,
@@ -107,12 +127,14 @@ class DatasetService:
             dataset_name=dataset_name,
             documents=documents,
         )
-
+        prepare_chroma_ms = int((time.perf_counter() - phase_started) * 1000)
 
         chunk_size = get_settings().ingest_chunk_size
         all_embeddings: list[list[float]] = []
+        phase_metrics: dict[str, int] = {}
 
         try:
+            phase_started = time.perf_counter()
             await self._embed_and_insert(
                 ids=chroma_data.ids,
                 documents=chroma_data.documents,
@@ -120,17 +142,26 @@ class DatasetService:
                 chunk_size=chunk_size,
                 all_embeddings=all_embeddings,
                 collection_name=None,
+                metrics=phase_metrics,
+                metrics_prefix="documents",
+            )
+            phase_metrics["documents_total_ms"] = int(
+                (time.perf_counter() - phase_started) * 1000
             )
 
             chunked_count = 0
             chunked_payload_bytes = 0
 
             if es_chat:
+                phase_started = time.perf_counter()
                 chunked = self._build_chat_chunks(
                     dataset_id=dataset_id,
                     user_id=user_id,
                     dataset_name=dataset_name,
                     documents=documents,
+                )
+                phase_metrics["chat_chunk_build_ms"] = int(
+                    (time.perf_counter() - phase_started) * 1000
                 )
 
                 await self._embed_and_insert(
@@ -142,6 +173,11 @@ class DatasetService:
                     collection_name=(
                         get_settings().chroma_chunked_collection_name
                     ),
+                    metrics=phase_metrics,
+                    metrics_prefix="chunks",
+                )
+                phase_metrics["chunks_total_ms"] = int(
+                    (time.perf_counter() - phase_started) * 1000
                 )
 
                 chunked_count = len(chunked.ids)
@@ -179,6 +215,26 @@ class DatasetService:
                 tipo="chat" if es_chat else "dataset",
             )
 
+            logger.info(
+                "[dataset] ingest timings "
+                f"parse_ms={parse_ms} "
+                f"anonymization_ms={anonymization_ms} "
+                f"prepare_chroma_ms={prepare_chroma_ms} "
+                f"documents_embed_ms={phase_metrics.get('documents_embed_ms', 0)} "
+                f"documents_insert_ms={phase_metrics.get('documents_insert_ms', 0)} "
+                f"documents_total_ms={phase_metrics.get('documents_total_ms', 0)} "
+                f"chat_chunk_build_ms={phase_metrics.get('chat_chunk_build_ms', 0)} "
+                f"chunks_embed_ms={phase_metrics.get('chunks_embed_ms', 0)} "
+                f"chunks_insert_ms={phase_metrics.get('chunks_insert_ms', 0)} "
+                f"chunks_total_ms={phase_metrics.get('chunks_total_ms', 0)} "
+                f"documents={len(documents)} "
+                f"senders={anonymization.stats.remitentes} "
+                f"anon_collect_ms={anonymization.stats.collect_senders_ms} "
+                f"anon_regex_ms={anonymization.stats.build_sender_regex_ms} "
+                f"anon_process_ms={anonymization.stats.process_documents_ms} "
+                f"chunks={chunked_count}"
+            )
+
         except Exception:
 
             await self._rollback_dataset(
@@ -197,6 +253,7 @@ class DatasetService:
                 dataset.documents
             ),
             created_at=dataset.created_at,
+            anonymization=asdict(anonymization.stats),
         )
 
     def _parse_documents(
@@ -341,6 +398,8 @@ class DatasetService:
         chunk_size: int,
         all_embeddings: list[list[float]] | None,
         collection_name: str | None,
+        metrics: dict[str, int] | None = None,
+        metrics_prefix: str = "documents",
     ) -> None:
         """Embebe e inserta por bloques en threads (no bloquea el loop)."""
         total = len(ids)
@@ -348,14 +407,21 @@ class DatasetService:
         for inicio in range(0, total, chunk_size):
             fin = min(inicio + chunk_size, total)
 
+            embed_started = time.perf_counter()
             embeddings = await asyncio.to_thread(
                 self.embedding_provider.embed_documents,
                 documents[inicio:fin],
             )
+            if metrics is not None:
+                metrics[f"{metrics_prefix}_embed_ms"] = (
+                    metrics.get(f"{metrics_prefix}_embed_ms", 0)
+                    + int((time.perf_counter() - embed_started) * 1000)
+                )
 
             if all_embeddings is not None:
                 all_embeddings.extend(embeddings)
 
+            insert_started = time.perf_counter()
             await asyncio.to_thread(
                 self.chroma.add_documents,
                 ids=ids[inicio:fin],
@@ -364,6 +430,11 @@ class DatasetService:
                 embeddings=embeddings,
                 collection_name=collection_name,
             )
+            if metrics is not None:
+                metrics[f"{metrics_prefix}_insert_ms"] = (
+                    metrics.get(f"{metrics_prefix}_insert_ms", 0)
+                    + int((time.perf_counter() - insert_started) * 1000)
+                )
 
     def _build_chat_chunks(
         self,

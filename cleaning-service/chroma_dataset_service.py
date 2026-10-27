@@ -79,13 +79,20 @@ class ChromaDatasetService:
     ) -> None:
 
         rows = []
+        has_class = any(
+            document.get("clase") is not None
+            and str(document.get("clase")).strip()
+            for document in documents
+        )
 
         for document in documents:
 
             row = {
                 "texto": document.get("texto"),
-                "clase": document.get("clase"),
             }
+
+            if has_class:
+                row["clase"] = document.get("clase")
 
             fecha = document.get("fecha")
 
@@ -103,6 +110,7 @@ class ChromaDatasetService:
                         key: value
                         for key, value in metadata.items()
                         if key not in _INTERNAL_METADATA_FIELDS
+                        and key != "embedding_model"
                     }
                 )
 

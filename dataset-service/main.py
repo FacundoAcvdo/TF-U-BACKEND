@@ -25,6 +25,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from fastapi.encoders import jsonable_encoder
 
+from anonymization_service import AnonymizationService
 from chroma_repository import ChromaRepository
 from config import get_settings
 from dependencies import (
@@ -94,10 +95,13 @@ embedding_provider = LocalSentenceTransformerProvider(
     fp16=settings.embedding_fp16,
 )
 
+anonymization_service = AnonymizationService()
+
 dataset_service = DatasetService(
     supabase_repository=supabase_repository,
     chroma_repository=chroma_repository,
     embedding_provider=embedding_provider,
+    anonymization_service=anonymization_service,
 )
 
 class SearchRequest(BaseModel):
@@ -342,6 +346,7 @@ async def _run_upload_job_async(job_id: str, content: bytes, params: dict, user_
             "filename": dataset.filename,
             "total_registros_guardados": dataset.total_documents,
             "created_at": dataset.created_at,
+            "anonimizacion": dataset.anonymization or {},
         }
     except HTTPException as e:
         logger.warning(f"[dataset-service] job {job_id} fallo | code={e.status_code} detail={e.detail}")
