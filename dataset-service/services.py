@@ -254,6 +254,7 @@ class DatasetService:
             ),
             created_at=dataset.created_at,
             anonymization=asdict(anonymization.stats),
+            anonymization_dictionary=anonymization.dictionary,
         )
 
     def _parse_documents(

@@ -80,6 +80,8 @@ class DatasetInfo:
 
     anonymization: dict[str, Any] | None = None
 
+    anonymization_dictionary: dict[str, Any] | None = None
+
 @dataclass
 class ChromaDocuments:
 

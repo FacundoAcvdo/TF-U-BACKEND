@@ -1,10 +1,11 @@
 import asyncio
+import threading
 import time
 import uuid
 import os
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from contextlib import asynccontextmanager
 import logging
@@ -103,6 +104,40 @@ dataset_service = DatasetService(
     embedding_provider=embedding_provider,
     anonymization_service=anonymization_service,
 )
+
+_EPHEMERAL_DICT_TTL_SECONDS = 600
+_ephemeral_dict_lock = threading.Lock()
+_ephemeral_dictionaries: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _clear_user_ephemeral_dictionaries(user_id: str) -> None:
+    now = time.monotonic()
+    with _ephemeral_dict_lock:
+        expired_or_user = [
+            key
+            for key, (ts, _) in _ephemeral_dictionaries.items()
+            if key[1] == user_id or (now - ts) > _EPHEMERAL_DICT_TTL_SECONDS
+        ]
+        for key in expired_or_user:
+            _ephemeral_dictionaries.pop(key, None)
+
+
+def _store_ephemeral_dictionary(job_id: str, user_id: str, dictionary: dict[str, Any]) -> None:
+    _clear_user_ephemeral_dictionaries(user_id)
+    with _ephemeral_dict_lock:
+        _ephemeral_dictionaries[(job_id, user_id)] = (time.monotonic(), dictionary)
+
+
+def _pop_ephemeral_dictionary(job_id: str, user_id: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _ephemeral_dict_lock:
+        entry = _ephemeral_dictionaries.pop((job_id, user_id), None)
+        if entry is None:
+            return None
+        ts, dictionary = entry
+        if (now - ts) > _EPHEMERAL_DICT_TTL_SECONDS:
+            return None
+        return dictionary
 
 class SearchRequest(BaseModel):
     query: str = Field(
@@ -291,6 +326,8 @@ async def start_upload(
             detail="Error interno del servidor.",
         ) from exc
 
+    _clear_user_ephemeral_dictionaries(x_user_id)
+
     background_tasks.add_task(
         _run_upload_job, job["job_id"], content,
         {
@@ -348,6 +385,11 @@ async def _run_upload_job_async(job_id: str, content: bytes, params: dict, user_
             "created_at": dataset.created_at,
             "anonimizacion": dataset.anonymization or {},
         }
+        _store_ephemeral_dictionary(
+            job_id,
+            user_id,
+            dataset.anonymization_dictionary or {},
+        )
     except HTTPException as e:
         logger.warning(f"[dataset-service] job {job_id} fallo | code={e.status_code} detail={e.detail}")
         jobs.mark_failed(supabase, job_id, e.status_code, str(e.detail))
@@ -381,6 +423,12 @@ async def get_job_status(
     row = jobs.get_job(supabase, job_id, x_user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job no encontrado.")
+    if row.get("status") == "succeeded":
+        ephemeral_dict = _pop_ephemeral_dictionary(job_id, x_user_id)
+        if ephemeral_dict is not None:
+            result_obj = dict(row.get("result") or {})
+            result_obj["diccionario_anonimizacion"] = ephemeral_dict
+            row["result"] = result_obj
     return row
 
 
