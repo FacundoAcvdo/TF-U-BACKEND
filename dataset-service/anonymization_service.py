@@ -17,7 +17,7 @@ import ipaddress
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from models import Document
@@ -138,6 +138,7 @@ class AnonymizationStats:
 class AnonymizationResult:
     documents: list[Document]
     stats: AnonymizationStats
+    dictionary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -402,6 +403,13 @@ class _Registry:
 
         self._seen_patterns: set[tuple[str, str]] = set()
         self._pii_tags: dict[tuple[str, str], str] = {}
+        self._pii_originals: dict[str, dict[str, str]] = {
+            "email": {},
+            "phone": {},
+            "ip": {},
+            "url": {},
+        }
+        self._person_originals: dict[str, list[str]] = {}
         self._normalized_cache: dict[str, str] = {}
         self._sender_key_cache: dict[str, tuple[str, str]] = {}
         self.text_cache: dict[str, tuple[str, tuple[int, int, int, int, int]]] = {}
@@ -445,9 +453,13 @@ class _Registry:
         self,
         kind: str,
         key: str,
+        raw_value: str | None = None,
     ) -> None:
         self.person_count += 1
         tag = f"PERSONA_{self.person_count}"
+        originals: list[str] = []
+        display_primary = (raw_value or key).strip() or key
+        originals.append(display_primary)
 
         if kind == "name":
             self.sender_name_tags[key] = tag
@@ -472,12 +484,18 @@ class _Registry:
                     self.sender_name_tags[alias] = tag
                     self._add_name_pattern(alias, alias)
                     self.sender_sequences[tuple(alias.split())] = tag
+                    raw_first = _first_token(display_primary)
+                    alias_display = raw_first if raw_first else alias
+                    if alias_display.casefold() != display_primary.casefold():
+                        originals.append(alias_display)
 
         elif kind == "email":
             self.sender_email_tags[key] = tag
 
         elif kind == "phone":
             self.sender_phone_tags[key] = tag
+
+        self._person_originals[tag] = originals
 
     def _add_name_pattern(
         self,
@@ -515,6 +533,7 @@ class _Registry:
         self,
         kind: str,
         canonical: str,
+        raw_value: str | None = None,
     ) -> str:
         key = (kind, canonical)
         tag = self._pii_tags.get(key)
@@ -525,15 +544,35 @@ class _Registry:
         self._pii_counters[kind] += 1
         tag = f"[{_PII_PREFIXES[kind]}_{self._pii_counters[kind]}]"
         self._pii_tags[key] = tag
+        self._pii_originals[kind][tag] = (raw_value or canonical).strip() or canonical
 
         return tag
+
+    def to_dictionary(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+
+        if self._person_originals:
+            result["personas"] = dict(self._person_originals)
+
+        category_map = (
+            ("email", "emails"),
+            ("phone", "telefonos"),
+            ("ip", "ips"),
+            ("url", "urls"),
+        )
+        for internal_key, export_key in category_map:
+            entries = self._pii_originals.get(internal_key)
+            if entries:
+                result[export_key] = dict(entries)
+
+        return result
 
 
 def _collect_senders(
     documents: list[Document],
     registry: _Registry,
-) -> list[tuple[str, str]]:
-    ordered: list[tuple[str, str]] = []
+) -> list[tuple[str, str, str]]:
+    ordered: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
 
     for document in documents:
@@ -561,7 +600,7 @@ def _collect_senders(
             continue
 
         seen.add(sender)
-        ordered.append(sender)
+        ordered.append((kind, key, raw))
 
     return ordered
 
@@ -586,8 +625,8 @@ class AnonymizationService:
         registry = _Registry()
 
         collect_started = time.perf_counter()
-        for kind, key in _collect_senders(documents, registry):
-            registry.add_sender(kind, key)
+        for kind, key, raw_value in _collect_senders(documents, registry):
+            registry.add_sender(kind, key, raw_value)
         stats.collect_senders_ms = int(
             (time.perf_counter() - collect_started) * 1000
         )
@@ -645,6 +684,7 @@ class AnonymizationService:
         return AnonymizationResult(
             documents=documents,
             stats=stats,
+            dictionary=registry.to_dictionary(),
         )
 
     def _anonymize_author(
@@ -733,7 +773,7 @@ class AnonymizationService:
                 canonical = _canonical_email(span.text)
                 tag = (
                     registry.sender_email_tags.get(canonical)
-                    or registry.pii_tag("email", canonical)
+                    or registry.pii_tag("email", canonical, span.text)
                 )
                 stats.emails += 1
 
@@ -741,7 +781,7 @@ class AnonymizationService:
                 canonical = _canonical_phone(span.text)
                 tag = (
                     registry.sender_phone_tags.get(canonical)
-                    or registry.pii_tag("phone", canonical)
+                    or registry.pii_tag("phone", canonical, span.text)
                 )
                 stats.telefonos += 1
 
@@ -749,11 +789,11 @@ class AnonymizationService:
                 canonical = str(
                     ipaddress.ip_address(span.text)
                 )
-                tag = registry.pii_tag("ip", canonical)
+                tag = registry.pii_tag("ip", canonical, span.text)
                 stats.ips += 1
 
             else:
-                tag = registry.pii_tag("url", span.text)
+                tag = registry.pii_tag("url", span.text, span.text)
                 stats.urls += 1
 
             replacements.append(
