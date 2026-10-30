@@ -28,7 +28,8 @@ class TopicModelingService:
         dataset_name: str,
         user_id: str,
         user_token: str,
-        max_topics: int=30,
+        max_topics: int = 30,
+        privacy_mode: bool = False,
     ) -> dict[str, Any]:
 
         dataset = await self.supabase.get_dataset_by_name(
@@ -56,6 +57,7 @@ class TopicModelingService:
                 dataset_id=dataset_id,
                 max_topics=max_topics,
                 user_token=user_token,
+                privacy_mode=privacy_mode,
             )
             return enriched
 
@@ -88,7 +90,7 @@ class TopicModelingService:
             max_topics=max_topics,
         )
 
-        resultado = await self._apply_titles(resultado)
+        resultado = await self._apply_titles(resultado, privacy_mode=privacy_mode)
 
         try:
             await self.supabase.save_topic_results(
@@ -99,9 +101,9 @@ class TopicModelingService:
                 user_token=user_token,
             )
         except Exception as exc:
-            logger.warning("[TopicModelingService] No se pudo guardar en "
-
-                f"Supabase: {exc}")
+            logger.warning(
+                f"[TopicModelingService] No se pudo guardar en Supabase: {exc}"
+            )
 
         return resultado
 
@@ -113,7 +115,7 @@ class TopicModelingService:
         user_token: str,
         max_topics: int = 30,
     ) -> dict[str, Any] | None:
-        """Solo lee Supabase. No calcula ni llama a Gemini."""
+        """Solo lee Supabase. No calcula ni llama al LLM."""
         dataset = await self.supabase.get_dataset_by_name(
             dataset_name=dataset_name,
             user_id=user_id,
@@ -133,6 +135,7 @@ class TopicModelingService:
     async def _apply_titles(
         self,
         resultado: dict[str, Any],
+        privacy_mode: bool = False,
     ) -> dict[str, Any]:
         topics = resultado.get("topics", [])
 
@@ -145,7 +148,10 @@ class TopicModelingService:
                 topic.setdefault("title_source", "keywords")
             return resultado
 
-        titles = await self.title_provider.generate_titles(topics)
+        titles = await self.title_provider.generate_titles(
+            topics,
+            privacy_mode=privacy_mode,
+        )
 
         for topic in topics:
             topic_id = int(topic["topic_id"])
@@ -158,7 +164,7 @@ class TopicModelingService:
                 )
                 topic["title_source"] = (
                     "keywords"
-                    if self.title_provider.is_available
+                    if self.title_provider.is_available_for(privacy_mode=privacy_mode)
                     else "disabled"
                 )
 
@@ -172,6 +178,7 @@ class TopicModelingService:
         dataset_id: str,
         max_topics: int,
         user_token: str,
+        privacy_mode: bool = False,
     ) -> dict[str, Any]:
         """Etiqueta cachés viejos que no tienen `title` y los re-graba."""
         topics = resultado.get("topics", [])
@@ -179,7 +186,7 @@ class TopicModelingService:
         if topics and all("title" in topic for topic in topics):
             return resultado
 
-        updated = await self._apply_titles(resultado)
+        updated = await self._apply_titles(resultado, privacy_mode=privacy_mode)
 
         try:
             await self.supabase.save_topic_results(

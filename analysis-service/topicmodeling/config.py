@@ -18,8 +18,16 @@ class Settings(BaseSettings):
     chroma_token: str = ""
     chroma_collection_name: str = "documents"
 
+    llm_provider: str = "groq"
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-20b"
     google_api_key: str = ""
     llm_model: str = "gemini-2.0-flash"
+    ollama_base_url: str = "http://ollama:11434"
+    ollama_model: str = "qwen3:8b"
+    ollama_keep_alive: str = "5m"
+    ollama_timeout_seconds: int = 180
+    ollama_num_ctx: int = 4096
     title_enabled: bool = True
     title_batch_size: int = 20
     title_max_chars_per_doc: int = 400

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from auth import verify_jwt, has_accepted_terms_claim, mark_terms_accepted
+from config import SERVICE_URL_ENV, ServiceConfigurationError, service_url
 import httpx
 import logging
 import time
@@ -23,6 +24,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -85,7 +87,7 @@ async def verify_jwt_and_terms(request: Request, user: dict = Depends(verify_jwt
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             upstream = await client.get(
-                os.getenv("AUTH_SERVICE_URL") + "/auth/me",
+                service_url("auth", "/auth/me"),
                 headers={
                     "X-User-Token": user["raw_token"],
                     "X-User-ID": user["sub"],
@@ -172,13 +174,15 @@ async def accept_terms_proxy(request: Request, user: dict = Depends(verify_jwt))
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             upstream = await client.post(
-                os.getenv("AUTH_SERVICE_URL") + "/auth/terms/accept",
+                service_url("auth", "/auth/terms/accept"),
                 headers={
                     "X-User-Token": user["raw_token"],
                     "X-User-ID": user["sub"],
                     "X-Request-ID": getattr(request.state, "request_id", ""),
                 },
             )
+    except ServiceConfigurationError as e:
+        raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
 
@@ -281,7 +285,7 @@ async def gateway(service: str, operation: str, request: Request, user: dict = D
 
 
 @app.patch("/rag/chat/mode")
-async def rag_chat_mode_proxy(request: Request, user: dict = Depends(verify_jwt)):
+async def rag_chat_mode_proxy(request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_service(request, "rag", "chat/mode", user)
 
 

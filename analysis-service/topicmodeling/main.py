@@ -45,8 +45,16 @@ supabase_service = SupabaseService()
 chroma_service = ChromaService()
 topic_provider = TopicModelingProvider()
 title_provider = TitleProvider(
+    provider=settings.llm_provider,
+    groq_api_key=settings.groq_api_key,
+    groq_model=settings.groq_model,
     api_key=settings.google_api_key,
     model=settings.llm_model,
+    ollama_base_url=settings.ollama_base_url,
+    ollama_model=settings.ollama_model,
+    ollama_keep_alive=settings.ollama_keep_alive,
+    ollama_timeout_seconds=settings.ollama_timeout_seconds,
+    ollama_num_ctx=settings.ollama_num_ctx,
     enabled=settings.title_enabled,
     batch_size=settings.title_batch_size,
     max_chars_per_doc=settings.title_max_chars_per_doc,
@@ -89,6 +97,7 @@ async def start_get_topics(
     background_tasks: BackgroundTasks,
     dataset: str = Body(..., embed=True),
     max_topics: int = Body(30, embed=True),
+    privacy_mode: bool = Body(False, embed=True),
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
 ):
@@ -99,12 +108,18 @@ async def start_get_topics(
         job = jobs.create_job(
             supabase, service="topicmodeling", job_type="topics",
             user_id=x_user_id, dataset_name=dataset,
-            params={"max_topics": max_topics},
+            params={"max_topics": max_topics, "privacy_mode": bool(privacy_mode)},
         )
     except Exception as e:
         logger.exception(f"[topicmodeling] fallo creando job | user_id={x_user_id} causa={type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor.") from e
-    background_tasks.add_task(_run_topics_job, job["job_id"], {"dataset": dataset, "max_topics": max_topics}, x_user_id, x_user_token)
+    background_tasks.add_task(
+        _run_topics_job,
+        job["job_id"],
+        {"dataset": dataset, "max_topics": max_topics, "privacy_mode": bool(privacy_mode)},
+        x_user_id,
+        x_user_token,
+    )
     return {"job_id": job["job_id"], "status": "queued", "dataset": dataset}
 
 
@@ -119,6 +134,7 @@ async def _run_topics_job_async(job_id: str, payload: dict, user_id: str, user_t
         result = await _compute_get_topics(
             dataset=payload["dataset"],
             max_topics=payload.get("max_topics", 30),
+            privacy_mode=bool(payload.get("privacy_mode", False)),
             x_user_id=user_id, x_user_token=user_token,
         )
     except HTTPException as e:
@@ -158,7 +174,7 @@ async def list_active_jobs(
 async def _compute_get_topics(
     dataset: str = Body(..., embed=True),
     max_topics: int = Body(30, embed=True),
-
+    privacy_mode: bool = Body(False, embed=True),
     x_user_id: str = Header(...),
     x_user_token: str = Header(...),
 ):
@@ -173,6 +189,7 @@ async def _compute_get_topics(
             user_id=x_user_id,
             user_token=x_user_token,
             max_topics=max_topics,
+            privacy_mode=privacy_mode,
         )
 
         return {
