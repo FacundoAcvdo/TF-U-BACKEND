@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import time
 import uuid
 from fastapi import FastAPI, Header, HTTPException, Response, Request
@@ -72,10 +73,13 @@ async def login(data: LoginRequest, response: Response):
         path="/",
     )
 
+    meta = result.user.app_metadata if isinstance(getattr(result.user, "app_metadata", None), dict) else {}
+
     return {
         "user": {
             "id": result.user.id,
             "email": result.user.email,
+            "terms_accepted": bool(meta.get("terms_accepted", False)),
         },
         "access_token": result.session.access_token,
         "expires_in": result.session.expires_in,
@@ -109,6 +113,8 @@ def _resumen_usuario(u) -> dict:
         "id": u.id,
         "email": u.email,
         "role": meta.get("role", "user"),
+        "terms_accepted": bool(meta.get("terms_accepted", False)),
+        "terms_accepted_at": meta.get("terms_accepted_at"),
         "created_at": str(getattr(u, "created_at", None)),
         "last_sign_in_at": str(getattr(u, "last_sign_in_at", None)),
     }
@@ -139,6 +145,32 @@ async def me(x_user_id: Optional[str] = Header(default=None, alias="X-User-ID"))
         raise HTTPException(401, "No autenticado")
     return {"user": _resumen_usuario(resp.user)}
 
+@app.post("/auth/terms/accept")
+async def accept_terms(x_user_id: Optional[str] = Header(default=None, alias="X-User-ID")):
+    if not x_user_id:
+        raise HTTPException(401, "No autenticado")
+    try:
+        client = _admin_client()
+        actual = client.auth.admin.get_user_by_id(x_user_id)
+        if actual.user is None:
+            raise HTTPException(401, "No autenticado")
+        meta = dict(actual.user.app_metadata) if isinstance(actual.user.app_metadata, dict) else {}
+        if not meta.get("terms_accepted"):
+            meta["terms_accepted"] = True
+            meta["terms_accepted_at"] = datetime.now(timezone.utc).isoformat()
+            resp = client.auth.admin.update_user_by_id(
+                x_user_id, {"app_metadata": meta}
+            )
+            usuario = resp.user
+        else:
+            usuario = actual.user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[auth-service] fallo en POST /auth/terms/accept | method=POST user_id={x_user_id} causa={type(e).__name__}: {e}")
+        raise HTTPException(500, "No se pudo registrar la aceptación de los términos.")
+    return {"message": "Términos y condiciones aceptados", "user": _resumen_usuario(usuario)}
+
 @app.get("/auth/admin/users")
 async def admin_listar_usuarios(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-ID"),
@@ -164,7 +196,7 @@ async def admin_crear_usuario(
             "email": data.email,
             "password": data.password,
             "email_confirm": True,
-            "app_metadata": {"role": data.role},
+            "app_metadata": {"role": data.role, "terms_accepted": False},
         })
     except Exception as e:
         logger.exception(f"[auth-service] fallo en POST /auth/admin/users | method=POST user_id={x_user_id} causa={type(e).__name__}: {e}")
@@ -181,8 +213,12 @@ async def admin_cambiar_rol(
     if user_id == actor.id and data.role != ADMIN_ROLE:
         raise HTTPException(400, "No podés quitarte tu propio rol de super admin")
     try:
-        resp = _admin_client().auth.admin.update_user_by_id(
-            user_id, {"app_metadata": {"role": data.role}}
+        client = _admin_client()
+        actual = client.auth.admin.get_user_by_id(user_id)
+        meta = dict(actual.user.app_metadata) if actual.user and isinstance(actual.user.app_metadata, dict) else {}
+        meta["role"] = data.role
+        resp = client.auth.admin.update_user_by_id(
+            user_id, {"app_metadata": meta}
         )
     except Exception as e:
         logger.exception(f"[auth-service] fallo en PATCH rol | method=PATCH user_id={user_id} causa={type(e).__name__}: {e}")

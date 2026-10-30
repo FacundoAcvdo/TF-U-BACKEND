@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
-from auth import verify_jwt
-from config import SERVICE_URL_ENV, ServiceConfigurationError, service_url
+from auth import verify_jwt, has_accepted_terms_claim, mark_terms_accepted
 import httpx
 import logging
 import time
@@ -50,8 +49,6 @@ async def log_requests(request: Request, call_next):
 
 
 def _passthrough_response(upstream: httpx.Response) -> Response:
-
-
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -81,6 +78,34 @@ def _map_upstream_error(request: Request, e: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Error de comunicación con el servicio.")
 
 
+async def verify_jwt_and_terms(request: Request, user: dict = Depends(verify_jwt)) -> dict:
+    if has_accepted_terms_claim(user):
+        return user
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            upstream = await client.get(
+                os.getenv("AUTH_SERVICE_URL") + "/auth/me",
+                headers={
+                    "X-User-Token": user["raw_token"],
+                    "X-User-ID": user["sub"],
+                    "X-Request-ID": getattr(request.state, "request_id", ""),
+                },
+            )
+        if upstream.status_code == 200:
+            data = upstream.json()
+            if (data.get("user") or {}).get("terms_accepted") is True:
+                mark_terms_accepted(user["sub"])
+                return user
+    except Exception as e:
+        logger.warning(f"[api-gateway] fallo consultando terms_accepted en auth-service: {e}")
+
+    raise HTTPException(
+        status_code=403,
+        detail="Debes aceptar los términos y condiciones antes de utilizar la plataforma.",
+    )
+
+
 @app.post("/auth/login")
 async def login_proxy(request: Request, response: Response):
     try:
@@ -102,6 +127,15 @@ async def login_proxy(request: Request, response: Response):
             f"[api-gateway] login rechazado por auth-service | "
             f"status={upstream.status_code} req={getattr(request.state, 'request_id', '-')}"
         )
+    else:
+        try:
+            body_json = upstream.json()
+            user_obj = body_json.get("user") or {}
+            if user_obj.get("terms_accepted") is True and user_obj.get("id"):
+                mark_terms_accepted(user_obj["id"])
+        except Exception:
+            pass
+
     return _passthrough_response(upstream)
 
 
@@ -121,6 +155,36 @@ async def me_proxy(request: Request, user: dict = Depends(verify_jwt)):
         raise HTTPException(500, str(e))
     except Exception as e:
         raise _map_upstream_error(request, e)
+
+    if upstream.status_code == 200:
+        try:
+            data = upstream.json()
+            if (data.get("user") or {}).get("terms_accepted") is True:
+                mark_terms_accepted(user["sub"])
+        except Exception:
+            pass
+
+    return _passthrough_response(upstream)
+
+
+@app.post("/auth/terms/accept")
+async def accept_terms_proxy(request: Request, user: dict = Depends(verify_jwt)):
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            upstream = await client.post(
+                os.getenv("AUTH_SERVICE_URL") + "/auth/terms/accept",
+                headers={
+                    "X-User-Token": user["raw_token"],
+                    "X-User-ID": user["sub"],
+                    "X-Request-ID": getattr(request.state, "request_id", ""),
+                },
+            )
+    except Exception as e:
+        raise _map_upstream_error(request, e)
+
+    if upstream.status_code < 400:
+        mark_terms_accepted(user["sub"])
+
     return _passthrough_response(upstream)
 
 
@@ -187,32 +251,32 @@ async def _proxy_auth(request: Request, method: str, path: str, user: dict) -> R
 
 
 @app.get("/auth/admin/users")
-async def admin_users_list_proxy(request: Request, user: dict = Depends(verify_jwt)):
+async def admin_users_list_proxy(request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_auth(request, "GET", "/auth/admin/users", user)
 
 
 @app.post("/auth/admin/users")
-async def admin_users_create_proxy(request: Request, user: dict = Depends(verify_jwt)):
+async def admin_users_create_proxy(request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_auth(request, "POST", "/auth/admin/users", user)
 
 
 @app.patch("/auth/admin/users/{user_id}/role")
-async def admin_users_role_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+async def admin_users_role_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_auth(request, "PATCH", f"/auth/admin/users/{user_id}/role", user)
 
 
 @app.patch("/auth/admin/users/{user_id}/password")
-async def admin_users_password_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+async def admin_users_password_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_auth(request, "PATCH", f"/auth/admin/users/{user_id}/password", user)
 
 
 @app.delete("/auth/admin/users/{user_id}")
-async def admin_users_delete_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt)):
+async def admin_users_delete_proxy(request: Request, user_id: str, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_auth(request, "DELETE", f"/auth/admin/users/{user_id}", user)
 
 
-@app.api_route("/{service}/{operation}", methods=["GET", "POST", "PUT", "DELETE"])
-async def gateway(service: str, operation: str, request: Request, user: dict = Depends(verify_jwt)):
+@app.api_route("/{service}/{operation}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def gateway(service: str, operation: str, request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_service(request, service, operation, user)
 
 
@@ -222,20 +286,17 @@ async def rag_chat_mode_proxy(request: Request, user: dict = Depends(verify_jwt)
 
 
 @app.api_route("/{service}/jobs", methods=["GET"])
-async def jobs_list_proxy(service: str, request: Request, user: dict = Depends(verify_jwt)):
-
+async def jobs_list_proxy(service: str, request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_service(request, service, "jobs", user)
 
 
 @app.api_route("/{service}/jobs/{job_id}", methods=["GET"])
-async def job_status_proxy(service: str, job_id: str, request: Request, user: dict = Depends(verify_jwt)):
-
+async def job_status_proxy(service: str, job_id: str, request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_service(request, service, f"jobs/{job_id}", user)
 
 
 @app.api_route("/{service}/descargar/{job_id}", methods=["GET"])
-async def descargar_proxy(service: str, job_id: str, request: Request, user: dict = Depends(verify_jwt)):
-
+async def descargar_proxy(service: str, job_id: str, request: Request, user: dict = Depends(verify_jwt_and_terms)):
     return await _proxy_service(request, service, f"descargar/{job_id}", user)
 
 

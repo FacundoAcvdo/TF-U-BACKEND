@@ -8,6 +8,23 @@ JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 
 jwks_client = PyJWKClient(JWKS_URL)
 
+# Caché en memoria de usuarios que aceptaron los términos durante la sesión actual
+# (evita consultar auth-service cuando el JWT fue emitido justo antes de aceptar).
+_accepted_users_cache: set[str] = set()
+
+
+def mark_terms_accepted(user_id: str) -> None:
+    if user_id:
+        _accepted_users_cache.add(user_id)
+
+
+def has_accepted_terms_claim(user: dict) -> bool:
+    app_meta = user.get("app_metadata")
+    if isinstance(app_meta, dict) and app_meta.get("terms_accepted") is True:
+        return True
+    user_id = user.get("sub")
+    return bool(user_id and user_id in _accepted_users_cache)
+
 
 def verify_jwt(access_token: str = Cookie(None), authorization: str = Header(None)):
     if access_token is None and authorization:
